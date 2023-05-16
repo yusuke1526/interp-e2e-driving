@@ -12,195 +12,11 @@ from tf_agents.trajectories import time_step as ts
 
 from interp_e2e_driving.utils import nest_utils
 from interp_e2e_driving.networks.sequential_latent_network import *
+from interp_e2e_driving.networks.vision import VisionModel
+from interp_e2e_driving.networks.memory import MemoryModel
 
 tfd = tfp.distributions
 
-
-@gin.configurable
-class VisionModel(tf.Module):
-  """VAE
-  """
-
-  def __init__(self, input_names, reconstruct_names, obs_size, latent_size, r_loss_factor=0.1, base_depth=32, decoder_stddev=np.sqrt(0.1, dtype=np.float32), name=None):
-    super(VisionModel, self).__init__(name=name)
-    self.input_names = input_names
-    self.reconstruct_names = reconstruct_names
-    self.obs_size = obs_size
-    self.base_depth = base_depth
-    self.latent_size = latent_size
-    self.r_loss_factor= r_loss_factor
-
-    # Create encoders q(f_t|x_t)
-    self.encoders = {}
-    for name in self.input_names:
-      if obs_size == 64:
-        self.encoders[name] = Encoder64(base_depth, 8 * base_depth)
-      elif obs_size == 128:
-        self.encoders[name] = Encoder128(base_depth, 8 * base_depth)
-      elif obs_size == 256:
-        self.encoders[name] = Encoder256(base_depth, 8 * base_depth)
-      else:
-        raise NotImplementedError
-
-    # Create decoders q(x_t|z_t)
-    self.decoders = {}
-    for name in self.reconstruct_names:
-      if obs_size == 64:
-        self.decoders[name] = Decoder64(base_depth, scale=decoder_stddev)
-      elif obs_size == 128:
-        self.decoders[name] = Decoder128(base_depth, scale=decoder_stddev)
-      elif obs_size == 256:
-        self.decoders[name] = Decoder256(base_depth, scale=decoder_stddev)
-      else:
-        raise NotImplementedError
-      
-    # self.vae_z_means = {name: tf.keras.layers.Dense(self.latent_size) for name in self.input_names}
-    # self.vae_z_log_vars = {name: tf.keras.layers.Dense(self.latent_size) for name in self.input_names}
-
-    self.vae_z_mean = tf.keras.layers.Dense(self.latent_size)
-    self.vae_z_log_var = tf.keras.layers.Dense(self.latent_size)
-
-  def __call__(self, images):
-    z_mean, z_log_var, z = self.encode(images)
-    reconstructions = self.decode(z)
-
-    return z, reconstructions
-  
-  def get_z_dist(self, images):
-    features = {}
-    for name, encoder in self.encoders.items():
-        features[name] = encoder(images[name])
-    feature = tf.concat(list(features.values()), axis=-1)
-    z_mean = self.vae_z_mean(feature)
-    z_log_var = self.vae_z_log_var(feature)
-    return z_mean, z_log_var
-
-  def encode(self, images):
-    z_mean, z_log_var = self.get_z_dist(images)
-    z = self.sample_z(z_mean, z_log_var)
-    return z_mean, z_log_var, z
-  
-  def decode(self, z):
-    reconstructions = {}
-    for name, decoder in self.decoders.items():
-        reconstructions[name] = decoder(z).mean()
-        print(f'{name}: {reconstructions[name].shape}')
-    return reconstructions
-  
-  def init_prior_distribution(self):
-    return None #TODO
-  
-  def sample_z(self, mu, log_var):
-    epsilon = tf.keras.backend.random_normal(shape=mu.shape, mean=0., stddev=1.)
-    return mu + tf.math.exp(log_var / 2) * epsilon
-  
-  def compute_loss(self, images):
-    z_mean, z_log_var, z = self.encode(images)
-    reconstruction = self.decode(z)
-    reconstruction_losses = []
-    for name in self.reconstruct_names:
-      reconstruction_losses.append(tf.reduce_mean(
-          tf.square(images[name] - reconstruction[name]), axis = [1,2,3]
-      ))
-    reconstruction_loss = tf.stack(reconstruction_losses, axis=-1)
-    reconstruction_loss = tf.reduce_mean(reconstruction_loss, axis=-1)
-    reconstruction_loss *= self.r_loss_factor
-    kl_loss = 1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var)
-    kl_loss = tf.reduce_sum(kl_loss, axis = 1)
-    kl_loss *= -0.5
-    total_loss = reconstruction_loss + kl_loss
-    return tf.reduce_mean(kl_loss), tf.reduce_mean(reconstruction_loss), tf.reduce_mean(total_loss)
-
-@gin.configurable
-class MemoryModel(tf.Module):
-  """rnn + sampling
-  """
-
-  def __init__(self, latent_size, action_size, gaussian_mixtures, name=None, z_factor=0.1, rew_factor=0.1):
-    super(MemoryModel, self).__init__(name=name)
-    self.latent_size = latent_size
-    self.action_size = action_size
-    self.input_size = latent_size + action_size + 1
-    self.gaussian_mixtures = gaussian_mixtures
-    self.rnn = tf.keras.layers.LSTM(self.input_size, return_sequences=True, return_state=True)
-    self.mdn = tf.keras.layers.Dense(gaussian_mixtures * (3*latent_size) + 1)# 3 is for log_pi, mu, log_sigma, 1 is for reward pred
-    self.z_factor = z_factor
-    self.rew_factor = rew_factor
-
-    # p(z_{t+1}|h_t, z_t, a_t)
-    # self.prior = self.init_prior_distribution()
-    self.prior = tfd.MultivariateNormalDiag
-
-  def pred(self, input_z, input_action, prev_rew, state_input_h, state_input_c):
-    input = tf.concat((input_z, input_action, prev_rew), axis=-1)
-    rnn_output, state_h, state_c = self.rnn(input, initial_state=[state_input_h, state_input_c])
-    print(f'rnn_output.shape: {rnn_output.shape}')
-    mdn_output = self.mdn(rnn_output)
-    print(f'mdn_output.shape: {mdn_output.shape}')
-
-    z_pred = mdn_output[:, :, :-1]
-    z_pred = tf.reshape(z_pred, (-1, 3 * self.gaussian_mixtures))
-
-    log_pi, mu, log_sigma = self.get_mixture_coef(z_pred)    
-
-    rew_pred = mdn_output[:, :, -1]
-
-    return (log_pi, mu, log_sigma), rew_pred
-  
-  def compute_loss(self, y_pred, y_true):
-    '''
-    y_pred: ((log_pi, mu, log_sigma), rew_pred)
-    y_true: array of latent_size z and 1 reward
-    '''
-    z_pred, rew_pred = y_pred
-    z_loss = self.z_loss(z_pred, y_true)
-    rew_loss = self.rew_loss(rew_pred, y_true)
-
-    return self.z_factor * z_loss + self.rew_factor * rew_loss
-
-  def z_loss(self, y_pred, y_true):
-    log_pi, mu, log_sigma = y_pred
-    z_true = y_true[:, :, :self.latent_size]
-
-    flat_z_true = tf.reshape(z_true,(-1, 1))
-
-    z_loss = log_pi + self.tf_lognormal(flat_z_true, mu, log_sigma)
-    z_loss = -tf.reduce_logsumexp(z_loss, axis = 1, keepdims=True)
-
-    z_loss = tf.reduce_mean(z_loss)
-    print(z_loss)
-    return z_loss
-
-  def rew_loss(self, y_pred, y_true):
-    rew_pred = y_pred
-    rew_true = y_true[:, :, -1]
-    rew_loss =  tf.keras.metrics.binary_crossentropy(rew_true, rew_pred, from_logits = True)
-    
-    rew_loss = tf.reduce_mean(rew_loss)
-
-    return rew_loss
-
-  def get_mixture_coef(self, z_pred):
-    log_pi, mu, log_sigma = tf.split(z_pred, 3, 1)
-    log_pi = log_pi - tf.reduce_logsumexp(log_pi, axis = 1, keepdims = True) # axis 1 is the mixture axis
-
-    return log_pi, mu, log_sigma
-
-  def tf_lognormal(self, z_true, mu, log_sigma):
-    logSqrtTwoPI = np.log(np.sqrt(2.0 * np.pi))
-    print(f'z_true.shape: {z_true.shape}')
-    print(f'mu.shape: {mu.shape}')
-    return -0.5 * ((z_true - mu) / tf.math.exp(log_sigma)) ** 2 - log_sigma - logSqrtTwoPI
-  
-  def init_prior_distribution(self):
-    return None #TODO
-  
-  def sample_z(self, mdn_output):
-    '''
-    input: (B, gaussian_N, 3, latent_size)
-    '''
-
-    return self.prior(loc=mean, scale_diag=std).sample()
 
 @gin.configurable
 class WorldModel(tf.Module):
@@ -490,6 +306,8 @@ if __name__ == '__main__':
   # print(reconstructions['rgb'].shape)
   loss = vision.compute_loss(images)
   # print(loss)
+  z_mean, z_log_var, z = vision.encode(images)
+  print(z)
 
   # Memory Model
   # latent_size = 32
