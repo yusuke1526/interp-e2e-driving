@@ -9,7 +9,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import io
 import time
+from PIL import Image
 
 import numpy as np
 import tensorflow as tf
@@ -29,29 +31,37 @@ def encode_gif(images, fps):
   Raises:
     IOError: If the ffmpeg command returns an error.
   """
-  from subprocess import Popen, PIPE
-  h, w, c = images[0].shape
-  cmd = ['ffmpeg', '-y',
-         '-f', 'rawvideo',
-         '-vcodec', 'rawvideo',
-         '-r', '%.02f' % fps,
-         '-s', '%dx%d' % (w, h),
-         '-pix_fmt', {1: 'gray', 3: 'rgb24'}[c],
-         '-i', '-',
-         '-filter_complex',
-         '[0:v]split[x][z];[z]palettegen[y];[x]fifo[x];[x][y]paletteuse',
-         '-r', '%.02f' % fps,
-         '-f', 'gif',
-         '-']
-  proc = Popen(cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-  for image in images:
-    proc.stdin.write(image.tostring())
-  out, err = proc.communicate()
-  if proc.returncode:
-    err = '\n'.join([' '.join(cmd), err.decode('utf8')])
-    raise IOError(err)
-  del proc
-  return out
+  # from subprocess import Popen, PIPE
+  # h, w, c = images[0].shape
+  # cmd = ['ffmpeg', '-y',
+  #        '-f', 'rawvideo',
+  #        '-vcodec', 'rawvideo',
+  #        '-r', '%.02f' % fps,
+  #        '-s', '%dx%d' % (w, h),
+  #        '-pix_fmt', {1: 'gray', 3: 'rgb24'}[c],
+  #        '-i', '-',
+  #        '-filter_complex',
+  #        '[0:v]split[x][z];[z]palettegen[y];[x]fifo[x];[x][y]paletteuse',
+  #        '-r', '%.02f' % fps,
+  #        '-f', 'gif',
+  #        '-',
+  #        ]
+  # proc = Popen(cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+  # for image in images:
+  #   proc.stdin.write(image.tostring())
+  # out, err = proc.communicate()
+  # if proc.returncode:
+  #   err = '\n'.join([' '.join(cmd), err.decode('utf8')])
+  #   raise IOError(err)
+  # del proc
+
+  images = [Image.fromarray(image) for image in images]
+
+  with io.BytesIO() as data:
+    images[0].save(data, "gif", save_all=True, append_images=images[1:], optimize=False, duration=1000//fps, loop=0)
+    encoded_image_string = data.getvalue()
+
+  return encoded_image_string
 
 
 def py_gif_summary(tag, images, max_outputs, fps):

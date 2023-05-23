@@ -24,6 +24,8 @@ class WorldModel(tf.Module):
   def __init__(self,
                input_names,
                reconstruct_names,
+               action_size,
+               gaussian_mixtures=5,
                obs_size=64,
                base_depth=32,
                latent_size=64,
@@ -48,6 +50,8 @@ class WorldModel(tf.Module):
     self.latent_size = latent_size
     self.kl_analytic = kl_analytic
     self.obs_size = obs_size
+    self.action_size = action_size
+    self.gaussian_mixtures = gaussian_mixtures
 
     latent_first_prior_distribution_ctor = ConstantMultivariateNormalDiag
     latent_distribution_ctor = MultivariateNormalDiag
@@ -55,9 +59,9 @@ class WorldModel(tf.Module):
     # p(z_1)
     self.latent_first_prior = latent_first_prior_distribution_ctor(latent_size)
     # p(z_{t+1} | z_t, a_t)
-    self.memory = MemoryModel(latent_size)
+    self.memory = MemoryModel(latent_size, action_size, gaussian_mixtures)
 
-    self.vision = VisionModel()
+    self.vision = VisionModel(input_names, reconstruct_names, obs_size, latent_size)
 
   def sample_prior(self, batch_size):
     """Sample the prior latent state."""
@@ -83,7 +87,7 @@ class WorldModel(tf.Module):
     features = {}
     for name in self.input_names:
       images_tmp = tf.image.convert_image_dtype(images[name], tf.float32)
-      features[name] = self.encoders[name](images_tmp)
+      features[name] = self.vision.encoders[name](images_tmp)
     features = sum(features.values())
     return features
 
@@ -91,7 +95,7 @@ class WorldModel(tf.Module):
     """Reconstruct the images in reconstruct_names given the latent state."""
     posterior_images = {}
     for name in self.reconstruct_names:
-      posterior_images[name] = self.decoders[name](latent).mean()
+      posterior_images[name] = self.vision.decoders[name](latent).mean()
     posterior_images = tf.concat(list(posterior_images.values()), axis=-2)
     return posterior_images
 
@@ -136,67 +140,58 @@ class WorldModel(tf.Module):
       latent_prior_samples, latent_conditional_prior_samples)
 
   def compute_loss(self, images, actions, step_types, latent_posterior_samples_and_dists=None):
+    '''
+      images: dict of image: (B, sequence_length+1, h, w, c)
+      actions: (B, sequence_length+1, 2)
+      step_types: (B, sequence_length+1)
+    '''
+    next_images = {name: image_sequence[:, 1:] for name, image_sequence in images.items()}
+    images = {name: image_sequence[:, :-1] for name, image_sequence in images.items()}
+    next_actions = actions[:, 1:]
+    actions = actions[:, :-1]
+    rewards = tf.zeros([actions.shape[0], actions.shape[1], 1], tf.float32) #TODO rewardを引っ張ってこれるようにする
+    next_rewards = tf.zeros([actions.shape[0], actions.shape[1], 1], tf.float32)
     # Compuate the latents
-    latent_dists, latent_samples = self.compute_latents(images, actions, step_types, latent_posterior_samples_and_dists)
-    latent_posterior_dists, latent_prior_dists = latent_dists
-    latent_posterior_samples, latent_prior_samples, latent_conditional_prior_samples = latent_samples
+    next_z_means, next_z_log_vars, next_zs = self.vision.encode_sequence(next_images)
+    z_means, z_log_vars, zs = self.vision.encode_sequence(images)
 
-    # Compute the KL divergence part of the ELBO
+    # Compute the vision loss
     outputs = {}
-    if self.kl_analytic:
-      latent_kl_divergences = tfd.kl_divergence(latent_posterior_dists, latent_prior_dists)
-    else:
-      latent_kl_divergences = (latent_posterior_dists.log_prob(latent_posterior_samples)
-                                - latent_prior_dists.log_prob(latent_posterior_samples))
-    latent_kl_divergences = tf.reduce_sum(latent_kl_divergences, axis=1)
+    kl_loss, reconstruction_losses, vision_loss = self.vision.compute_sequence_loss(images)
     outputs.update({
-      'latent_kl_divergence': tf.reduce_mean(latent_kl_divergences),
+      'kl_loss': kl_loss,
     })
-
-    elbo = - latent_kl_divergences
-
-    # Compute the reconstruction part of the ELBO
-    likelihood_dists = {}
-    likelihood_log_probs = {}
-    reconstruction_error = {}
     for name in self.reconstruct_names:
-      likelihood_dists[name] = self.decoders[name](latent_posterior_samples)
-      images_tmp = tf.image.convert_image_dtype(images[name], tf.float32)
-      likelihood_log_probs[name] = likelihood_dists[name].log_prob(images_tmp)
-      likelihood_log_probs[name] = tf.reduce_sum(likelihood_log_probs[name], axis=1)
-      reconstruction_error[name] = tf.reduce_sum(tf.square(images_tmp - likelihood_dists[name].distribution.loc),
-                                         axis=list(range(-len(likelihood_dists[name].event_shape), 0)))
-      reconstruction_error[name] = tf.reduce_sum(reconstruction_error[name], axis=1)
       outputs.update({
-        'log_likelihood_'+name: tf.reduce_mean(likelihood_log_probs[name]),
-        'reconstruction_error_'+name: tf.reduce_mean(reconstruction_error[name]),
+        'reconstruction_loss_'+name: tf.reduce_mean(reconstruction_losses[name]),
       })
-      elbo += likelihood_log_probs[name]
+    loss = vision_loss
 
-    # average over the batch dimension
-    loss = -tf.reduce_mean(elbo)
+    # Compute the memory loss
+    # z_preds = self.memory.pred_sequence(zs, actions, rewards, None, None)
+    # z_true = tf.concat([next_zs, next_rewards], axis=-1)
+    # memory_loss = self.memory.compute_sequence_loss(z_preds, z_true)
+    # outputs.update({
+    #   'memory loss': memory_loss,
+    # })
+    # loss += memory_loss
 
-    # Generate the images
+    # Generate the images #TODO
     posterior_images = {}
-    prior_images = {}
-    conditional_prior_images = {}
-    for name in self.reconstruct_names:
-      posterior_images[name] = likelihood_dists[name].mean()
-      prior_images[name] = self.decoders[name](latent_prior_samples).mean()
-      conditional_prior_images[name] = self.decoders[name](latent_conditional_prior_samples).mean()
+    # conditional_prior_images = {}
+    posterior_images = self.vision.decode_sequence(zs)
+      # conditional_prior_images[name] = self.decoders[name](latent_conditional_prior_samples).mean()
 
     images = tf.concat([tf.image.convert_image_dtype(images[k], tf.float32)
       for k in list(set(self.input_names+self.reconstruct_names))], axis=-2)
     posterior_images = tf.concat(list(posterior_images.values()), axis=-2)
-    prior_images = tf.concat(list(prior_images.values()), axis=-2)
-    conditional_prior_images = tf.concat(list(conditional_prior_images.values()), axis=-2)
+    # conditional_prior_images = tf.concat(list(conditional_prior_images.values()), axis=-2)
 
     outputs.update({
-      'elbo': tf.reduce_mean(elbo),
+      'total_loss': loss,
       'images': images,
-      'posterior_images': posterior_images,
-      'prior_images': prior_images,
-      'conditional_prior_images': conditional_prior_images,
+      'posterior_images': posterior_images, #TODO p(x|z~q(z|x))からサンプリングした画像の列
+      # 'conditional_prior_images': conditional_prior_images, #TODO 条件付き事前分布p(z_1|x_1)からサンプリングして再構成した画像の列
     })
     return loss, outputs
 

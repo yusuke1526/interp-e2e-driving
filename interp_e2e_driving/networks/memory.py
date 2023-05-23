@@ -33,9 +33,41 @@ class MemoryModel(tf.Module):
     # self.prior = self.init_prior_distribution()
     self.prior = tfd.MultivariateNormalDiag
 
-  def pred(self, input_z, input_action, prev_rew, state_input_h, state_input_c):
+  def pred_sequence(self, input_zs, input_actions, prev_rews, state_input_hs=None, state_input_cs=None):
+    '''
+    args:
+      input_zs: (B, T, latent_size),
+      input_actions: (B, T, action_size),
+      prev_rews: (B, T, 1),
+      state_input: (B, T, latent_size+action_size+1)
+
+    return:
+      z_preds: (
+        log_pis: (B, T, latent_size),
+        mus: (B, T, latent_size),
+        log_sigmas: (B, T, latent_size)
+        ),
+        rew_pred: (B, T, 1)
+    '''
+    batch_size, sequence_length = list(input_zs.shape[:2])
+    size = batch_size * sequence_length
+    reshape = functools.partial(tf.reshape, shape=(size, -1))
+    input_zs = reshape(input_zs)
+    input_actions = reshape(input_actions)
+    prev_rews = reshape(prev_rews)
+    state_input_hs = reshape(state_input_hs) if state_input_hs else None
+    state_input_cs = reshape(state_input_cs) if state_input_cs else None
+
+    dists, rew_pred = self.pred(input_zs, input_actions, prev_rews, state_input_hs, state_input_cs)
+    reshape = functools.partial(tf.reshape, shape=(batch_size, sequence_length, -1))
+    return tuple(map(reshape, dists)), reshape(rew_pred)
+
+  def pred(self, input_z, input_action, prev_rew, state_input_h=None, state_input_c=None):
     input = tf.concat((input_z, input_action, prev_rew), axis=-1)
-    rnn_output, state_h, state_c = self.rnn(input, initial_state=[state_input_h, state_input_c])
+    if state_input_h is not None and state_input_c is not None:
+      rnn_output, state_h, state_c = self.rnn(input, initial_state=[state_input_h, state_input_c])
+    else:
+      rnn_output, state_h, state_c = self.rnn(input)
     # print(f'rnn_output.shape: {rnn_output.shape}')
     mdn_output = self.mdn(rnn_output)
     # print(f'mdn_output.shape: {mdn_output.shape}')
@@ -49,10 +81,29 @@ class MemoryModel(tf.Module):
 
     return (log_pi, mu, log_sigma), rew_pred
   
+  def compute_sequence_loss(self, y_preds, y_trues):
+    '''
+    args:
+      y_preds: (
+        log_pis: (B, T, latent_size),
+        mus: (B, T, latent_size),
+        log_sigmas: (B, T, latent_size)
+        ),
+        rew_pred: (B, T, 1)
+      y_trues: (B, T, latent_size + 1)
+    return:
+      loss
+    '''
+    rew_preds = tf.reshape(y_preds[-1], (-1, 1))
+    dists = tuple(map(lambda x: tf.reshape(x, (-1, self.latent_size)), y_preds[0]))
+    return self.compute_loss(dists, rew_preds)
+
+
   def compute_loss(self, y_pred, y_true):
     '''
-    y_pred: ((log_pi, mu, log_sigma), rew_pred)
-    y_true: array of latent_size z and 1 reward
+    args:
+      y_pred: ((log_pi, mu, log_sigma), rew_pred)
+      y_true: array of latent_size z and 1 reward
     '''
     z_pred, rew_pred = y_pred
     z_loss = self.z_loss(z_pred, y_true)
