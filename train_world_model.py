@@ -454,7 +454,7 @@ def train_world_model(
           gradient_clipping=gradient_clipping,
           summarize_grads_and_vars=summarize_grads_and_vars,
           train_step_counter=global_step,
-          ego_vehicle=py_env.gym.ego if py_env.gym.auto_exploration else None,
+          py_env=py_env if py_env.gym.auto_exploration else None,
           fps=fps)
 
     tf_agent.initialize()
