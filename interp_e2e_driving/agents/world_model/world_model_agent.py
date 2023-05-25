@@ -40,7 +40,7 @@ class WorldModelAgent(tf_agent.TFAgent):
                summarize_grads_and_vars,
                fps,
                train_step_counter=None,
-               ego_vehicle=None,
+               py_env=None,
                name=None):
     tf.Module.__init__(self, name=name)
 
@@ -53,10 +53,11 @@ class WorldModelAgent(tf_agent.TFAgent):
     self._train_step_counter = train_step_counter
     self._fps = fps
 
-    if ego_vehicle:
+    if py_env:
       policy = autopilot_policy.AutopilotPolicy(
+        time_step_spec=time_step_spec,
         action_spec=action_spec,
-        ego_vehicle=ego_vehicle
+        py_env=py_env
       )
     else:
       policy = random_tf_policy.RandomTFPolicy(
