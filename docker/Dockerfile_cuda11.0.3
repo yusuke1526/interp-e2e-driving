@@ -1,0 +1,38 @@
+# See all tag variants at https://hub.docker.com/r/tensorflow/tensorflow/tags/
+# build with `ln -sf Dockerfile.gpu Dockerfile && docker build --network=host -t {container-name} .`
+# NOTE(jwd) - if you wish to use this implementation, you must install nvidia-docker v2.0
+# see https://github.com/nvidia/nvidia-docker/wiki/Installation-(version-2.0) for steps
+# FROM ghcr.io/ehfd/nvidia-egl-desktop:18.04
+FROM nvidia-egl-desktop:20.04_cuda11.0.3
+
+SHELL ["bash", "-c"]
+
+RUN sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+	curl \
+	tmux \
+	less \
+	vim \
+	git \
+	glmark2 \
+	ffmpeg \
+	libsdl-dev \
+	libsdl-image1.2-dev \
+	libsdl-mixer1.2-dev \
+	libsdl-ttf2.0-dev \
+	libsmpeg-dev \
+	libportmidi-dev \
+	libavformat-dev \
+	libswscale-dev \
+	&& \
+    sudo apt-get clean && \
+    sudo rm -rf /var/lib/apt/lists/*
+
+RUN echo 'PATH="$PATH:/home/user/.local/bin"' >> ~/.bashrc
+
+# setup implements for carla
+RUN python3 -m pip install --upgrade pip
+
+RUN git clone https://github.com/yusuke1526/gym-carla
+RUN cd gym-carla && python3 -m pip install -r requirements.txt && python3 -m pip install -e .
+
+ENV PYTHONPATH $PYTHONPATH:/home/user/interp-e2e-driving/CARLA_0.9.6/PythonAPI/carla/dist/carla-0.9.6-py3.5-linux-x86_64.egg
