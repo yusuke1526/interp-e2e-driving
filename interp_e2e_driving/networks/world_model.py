@@ -6,16 +6,21 @@ import functools
 
 import gin
 import numpy as np
+import collections
+
 import tensorflow as tf
 import tensorflow_probability as tfp
 from tf_agents.trajectories import time_step as ts
 
-from interp_e2e_driving.utils import nest_utils
+from interp_e2e_driving.utils import nest_utils, gif_utils
 from interp_e2e_driving.networks.sequential_latent_network import *
 from interp_e2e_driving.networks.vision import VisionModel
 from interp_e2e_driving.networks.memory import MemoryModel
 
 tfd = tfp.distributions
+
+WorldModelLossInfo = collections.namedtuple(
+    'WorldModelLossInfo', ('model_loss'))
 
 
 @gin.configurable
@@ -31,6 +36,10 @@ class WorldModel(tf.Module):
                latent_size=64,
                kl_analytic=True,
                decoder_stddev=np.sqrt(0.1, dtype=np.float32),
+               optimizer=None,
+               train_step_counter=None,
+               batch_size=256,
+               num_images_per_summary=2,
                name=None):
     """Creates an instance of `WorldModel`.
     Args:
@@ -52,6 +61,10 @@ class WorldModel(tf.Module):
     self.obs_size = obs_size
     self.action_size = action_size
     self.gaussian_mixtures = gaussian_mixtures
+    self.optimizer = optimizer
+    self.train_step_counter=train_step_counter
+    self._model_batch_size = batch_size
+    self._num_images_per_summary = num_images_per_summary
 
     latent_first_prior_distribution_ctor = ConstantMultivariateNormalDiag
     latent_distribution_ctor = MultivariateNormalDiag
@@ -157,13 +170,13 @@ class WorldModel(tf.Module):
 
     # Compute the vision loss
     outputs = {}
-    kl_loss, reconstruction_losses, vision_loss = self.vision.compute_sequence_loss(images)
+    kl_divergence, reconstruction_errors, vision_loss = self.vision.compute_sequence_loss(images)
     outputs.update({
-      'kl_loss': kl_loss,
+      'kl_divergence': kl_divergence,
     })
     for name in self.reconstruct_names:
       outputs.update({
-        'reconstruction_loss_'+name: tf.reduce_mean(reconstruction_losses[name]),
+        'reconstruction_error_'+name: tf.reduce_mean(reconstruction_errors[name]),
       })
     loss = vision_loss
 
@@ -280,6 +293,72 @@ class WorldModel(tf.Module):
     latent_dists = nest_utils.map_distribution_structure(lambda *x: tf.stack(x, axis=1), *latent_dists)
     latent_samples = tf.stack(latent_samples, axis=1)
     return latent_samples, latent_dists
+  
+  def train(self, experience, weights=None, train_flag={'vision': True, 'memory': False, 'controller': False}):
+    """Train world model except for Controller"""
+    
+    with tf.GradientTape() as tape:
+
+      model_loss = self.model_loss(
+          experience.observation,
+          experience.action,
+          experience.step_type,
+          latent_posterior_samples_and_dists=None,
+          weights=weights)
+      
+    # which module trained
+    self.vision.trainable = train_flag['vision']
+    self.memory.trainable = train_flag['memory']
+    # self.controller.trainable = train_flag['controller']
+
+    tf.debugging.check_numerics(model_loss, 'Model loss is inf or nan.')
+    trainable_model_variables = self.trainable_variables
+    assert trainable_model_variables, ('No trainable model variables to '
+                                          'optimize.')
+    model_grads = tape.gradient(model_loss, trainable_model_variables)
+    self.optimizer.apply_gradients(zip(model_grads, trainable_model_variables))
+
+    self.train_step_counter.assign_add(1)
+
+    return model_loss
+  
+  def model_loss(self,
+                 images,
+                 actions,
+                 step_types,
+                 latent_posterior_samples_and_dists=None,
+                 weights=None):
+      with tf.name_scope('model_loss'):
+        if self._model_batch_size is not None:
+          actions, step_types = tf.nest.map_structure(
+              lambda x: x[:self._model_batch_size],
+              (actions, step_types))
+          images_new = {}
+          for k, v in images.items():
+            images_new[k] = v[:self._model_batch_size]
+
+        model_loss, outputs = self.compute_loss(
+            images_new, actions, step_types,
+            latent_posterior_samples_and_dists=latent_posterior_samples_and_dists)
+        for name, output in outputs.items():
+          if output.shape.ndims == 0:
+            tf.summary.scalar(name, output, step=self.train_step_counter)
+          elif output.shape.ndims == 5:
+            output = output[:self._num_images_per_summary]
+            output = tf.transpose(output, [1,0,2,3,4])
+            output = tf.reshape(output, [output.shape[0], output.shape[1]*output.shape[2], output.shape[3], output.shape[4]])
+            output = tf.expand_dims(output, axis=0)
+            gif_utils.gif_summary(name, output, fps=10,
+                         saturate=True, step=self.train_step_counter)
+          else:
+            raise NotImplementedError
+
+        if weights is not None:
+          model_loss *= weights
+
+        model_loss = tf.reduce_mean(input_tensor=model_loss)
+
+        return model_loss
   
 if __name__ == '__main__':
   batch_size = 16

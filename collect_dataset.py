@@ -24,7 +24,7 @@ from tf_agents.environments import gym_wrapper
 from tf_agents.environments import tf_py_environment
 from tf_agents.environments import wrappers
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
-from tf_agents.utils import common
+from tf_agents.utils import common, example_encoding_dataset
 from tf_agents.policies import random_tf_policy
 
 from interp_e2e_driving.agents.world_model import world_model_agent
@@ -189,7 +189,7 @@ def collect_dataset(
     )
 
     # Build the latent sac agent
-    collect_data_spec = world_model_agent.WorldModelAgent(
+    tf_agent = world_model_agent.WorldModelAgent(
         time_step_spec,
         action_spec,
         model_network=model_net,
@@ -202,14 +202,7 @@ def collect_dataset(
         summarize_grads_and_vars=summarize_grads_and_vars,
         train_step_counter=global_step,
         py_env=py_env if py_env.gym.auto_exploration else None,
-        fps=fps).collect_data_spec
-
-    # Get replay buffer
-    replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
-        data_spec=collect_data_spec,
-        batch_size=1,  # No parallel environments
-        max_length=replay_buffer_capacity)
-    replay_observer = [replay_buffer.add_batch]
+        fps=fps)
 
     # Get policies
     # initial_collect_policy = autopilot_policy.AutopilotPolicy(
@@ -219,41 +212,27 @@ def collect_dataset(
         action_spec=action_spec,
     )
 
-    # Checkpointers
-    rb_checkpointer = common.Checkpointer(
-        ckpt_dir=os.path.join(root_dir, 'replay_buffer'),
-        max_to_keep=1,
-        replay_buffer=replay_buffer)
-    rb_checkpointer.initialize_or_restore()
-
-    # Collect driver
-    initial_collect_driver = dynamic_step_driver.DynamicStepDriver(
-        tf_env,
-        initial_collect_policy,
-        observers=replay_observer,
-        num_steps=batch_size+sequence_length)
-
-    # Optimize the performance by using tf functions
-    initial_collect_driver.run = common.function(initial_collect_driver.run)
-
     for i in range(num_iteration):
+        # Get tfrecord observer
+        trajectory_spec = tf_agent.collect_data_spec
+        dataset_path = os.path.join(root_dir, f'dataset.tfrecord.{i}')
+        tfrecord_observer = example_encoding_dataset.TFRecordObserver(dataset_path, trajectory_spec)
+
+        # Collect driver
+        initial_collect_driver = dynamic_step_driver.DynamicStepDriver(
+            tf_env,
+            initial_collect_policy,
+            observers=[common.function(tfrecord_observer)],
+            num_steps=initial_collect_steps)
+
+        # Optimize the performance by using tf functions
+        initial_collect_driver.run = common.function(initial_collect_driver.run)
+
         # Collect initial replay data.
         logging.info(
             'Initializing replay buffer by collecting experience for %d steps'
             'with a random policy.', initial_collect_steps)
         initial_collect_driver.run()
-
-        # Dataset generates trajectories with shape [Bxslx...]
-        dataset = replay_buffer.as_dataset(
-            num_parallel_calls=3,
-            num_steps=sequence_length + 1,
-            single_deterministic_pass=True)
-
-        # データセットをTFRecord形式で保存するための設定
-        filename = os.path.join(root_dir, f'dataset.tfrecord.{i}')
-
-        # データセットを保存する
-        tf.data.experimental.save(dataset, filename)
 
 
 def main(_):

@@ -134,7 +134,7 @@ def gif_summary_v2(name, tensor, max_outputs, fps, family=None, step=None):
 
     event = event_pb2.Event(summary=summary)
     event.wall_time = time.time()
-    event.step = step
+    event.step = int(step)
     event_pb = event.SerializeToString()
     return event_pb
 
