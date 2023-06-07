@@ -152,18 +152,21 @@ class WorldModel(tf.Module):
     return (latent_posterior_dists, latent_prior_dists), (latent_posterior_samples,
       latent_prior_samples, latent_conditional_prior_samples)
 
-  def compute_loss(self, images, actions, step_types, latent_posterior_samples_and_dists=None):
+  def compute_loss(self, images, actions, rewards, step_types, latent_posterior_samples_and_dists=None):
     '''
       images: dict of image: (B, sequence_length+1, h, w, c)
-      actions: (B, sequence_length+1, 2)
+      actions: (B, sequence_length+1, action_size)
+      rewards: (B, sequence_length+1, 1) or (B, sequence_length+1)
       step_types: (B, sequence_length+1)
     '''
     next_images = {name: image_sequence[:, 1:] for name, image_sequence in images.items()}
     images = {name: image_sequence[:, :-1] for name, image_sequence in images.items()}
     next_actions = actions[:, 1:]
     actions = actions[:, :-1]
-    rewards = tf.zeros([actions.shape[0], actions.shape[1], 1], tf.float32) #TODO rewardを引っ張ってこれるようにする
-    next_rewards = tf.zeros([actions.shape[0], actions.shape[1], 1], tf.float32)
+    if len(rewards.shape) == 2:
+      rewards = tf.expand_dims(rewards, axis=-1)
+    next_rewards = rewards[:, 1:]
+    rewards = rewards[:, :-1]
     # Compuate the latents
     next_z_means, next_z_log_vars, next_zs = self.vision.encode_sequence(next_images)
     z_means, z_log_vars, zs = self.vision.encode_sequence(images)
@@ -181,13 +184,15 @@ class WorldModel(tf.Module):
     loss = vision_loss
 
     # Compute the memory loss
-    # z_preds = self.memory.pred_sequence(zs, actions, rewards, None, None)
-    # z_true = tf.concat([next_zs, next_rewards], axis=-1)
-    # memory_loss = self.memory.compute_sequence_loss(z_preds, z_true)
-    # outputs.update({
-    #   'memory loss': memory_loss,
-    # })
-    # loss += memory_loss
+    z_preds = self.memory.pred(zs, actions, rewards, None, None)
+    z_true = tf.concat([next_zs, next_rewards], axis=-1)
+    memory_loss, z_loss, rew_loss = self.memory.compute_loss(z_preds, z_true)
+    outputs.update({
+      'memory_loss': memory_loss,
+      'z_loss': z_loss,
+      'rew_loss': rew_loss
+    })
+    loss += memory_loss
 
     # Generate the images #TODO
     posterior_images = {}
@@ -296,15 +301,18 @@ class WorldModel(tf.Module):
   
   def train(self, experience, weights=None, train_flag={'vision': True, 'memory': False, 'controller': False}):
     """Train world model except for Controller"""
-    
     with tf.GradientTape() as tape:
 
       model_loss = self.model_loss(
           experience.observation,
           experience.action,
+          experience.reward,
           experience.step_type,
           latent_posterior_samples_and_dists=None,
           weights=weights)
+      
+    # print(f'self.vision.trainable_variables: {self.vision.trainable_variables}')
+    # print(f'self.memory.trainable_variables: {self.memory.trainable_variables}')
       
     # which module trained
     self.vision.trainable = train_flag['vision']
@@ -312,7 +320,10 @@ class WorldModel(tf.Module):
     # self.controller.trainable = train_flag['controller']
 
     tf.debugging.check_numerics(model_loss, 'Model loss is inf or nan.')
-    trainable_model_variables = self.trainable_variables
+    # trainable_model_variables = self.trainable_variables
+    trainable_model_variables = []
+    if train_flag['vision']: trainable_model_variables += self.vision.trainable_variables
+    if train_flag['memory']: trainable_model_variables += self.memory.trainable_variables
     assert trainable_model_variables, ('No trainable model variables to '
                                           'optimize.')
     model_grads = tape.gradient(model_loss, trainable_model_variables)
@@ -325,20 +336,15 @@ class WorldModel(tf.Module):
   def model_loss(self,
                  images,
                  actions,
+                 rewards,
                  step_types,
                  latent_posterior_samples_and_dists=None,
                  weights=None):
       with tf.name_scope('model_loss'):
-        if self._model_batch_size is not None:
-          actions, step_types = tf.nest.map_structure(
-              lambda x: x[:self._model_batch_size],
-              (actions, step_types))
-          images_new = {}
-          for k, v in images.items():
-            images_new[k] = v[:self._model_batch_size]
-
+        # print(f'images: {images["camera"].shape}')
+        # print(f'actions: {actions.shape}')
         model_loss, outputs = self.compute_loss(
-            images_new, actions, step_types,
+            images, actions, rewards, step_types,
             latent_posterior_samples_and_dists=latent_posterior_samples_and_dists)
         for name, output in outputs.items():
           if output.shape.ndims == 0:
@@ -381,7 +387,7 @@ if __name__ == '__main__':
   loss = vision.compute_loss(images)
   # print(loss)
   z_mean, z_log_var, z = vision.encode(images)
-  print(z)
+  # print(z)
 
   # Memory Model
   # latent_size = 32

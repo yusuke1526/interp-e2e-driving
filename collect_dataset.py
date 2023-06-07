@@ -15,6 +15,7 @@ import numpy as np
 import os
 import tensorflow as tf
 import pickle
+import glob
 
 import gym
 import gym_carla
@@ -212,7 +213,10 @@ def collect_dataset(
         action_spec=action_spec,
     )
 
-    for i in range(num_iteration):
+    tfrecords = [p for p in sorted(list(glob.glob(os.path.join(root_dir, 'dataset.tfrecord.*')))) if 'spec' not in p]
+    latent_num = int(tfrecords[-1].split('.')[-1])
+
+    for i in range(latent_num, latent_num+num_iteration):
         # Get tfrecord observer
         trajectory_spec = tf_agent.collect_data_spec
         dataset_path = os.path.join(root_dir, f'dataset.tfrecord.{i}')
