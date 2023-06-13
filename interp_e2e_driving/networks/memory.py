@@ -97,9 +97,9 @@ class MemoryModel(tf.Module):
     return z_loss
 
   def rew_loss(self, y_pred, y_true):
-    rew_pred = y_pred
-    rew_true = y_true[:, :, -1]
-    rew_loss =  tf.keras.metrics.binary_crossentropy(rew_true, rew_pred, from_logits = True)
+    rew_pred = tf.sigmoid(y_pred)
+    rew_true = tf.sigmoid(y_true[:, :, -1])
+    rew_loss =  tf.keras.backend.binary_crossentropy(rew_true, rew_pred)
     
     rew_loss = tf.reduce_mean(rew_loss)
 
