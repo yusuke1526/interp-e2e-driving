@@ -31,6 +31,7 @@ class WorldModelAgent(tf_agent.TFAgent):
   def __init__(self,
                time_step_spec,
                action_spec,
+               inner_agent,
                model_network,
                model_optimizer,
                model_batch_size,
@@ -44,6 +45,7 @@ class WorldModelAgent(tf_agent.TFAgent):
                name=None):
     tf.Module.__init__(self, name=name)
 
+    self._inner_agent = inner_agent
     self._model_network = model_network
     self._model_optimizer = model_optimizer
     self._model_batch_size = model_batch_size
@@ -84,95 +86,53 @@ class WorldModelAgent(tf_agent.TFAgent):
 
   def train_model(self, experience, weights=None, train_flag={'vision': True, 'memory': False, 'controller': False}):
     """Train world model except for Controller"""
-    
-    with tf.GradientTape() as tape:
 
-      model_loss = self.model_loss(
-          experience.observation,
-          experience.action,
-          experience.step_type,
-          latent_posterior_samples_and_dists=None,
-          weights=weights)
-      
-    # which module trained
-    self._model_network.vision.trainable = train_flag['vision']
-    self._model_network.memory.trainable = train_flag['memory']
-    # self.controller.trainable = train_flag['controller']
+    model_loss = self._model_network.train(experience, weights, train_flag)
 
-    tf.debugging.check_numerics(model_loss, 'Model loss is inf or nan.')
-    trainable_model_variables = self._model_network.trainable_variables
-    assert trainable_model_variables, ('No trainable model variables to '
-                                          'optimize.')
-    model_grads = tape.gradient(model_loss, trainable_model_variables)
-    self._apply_gradients(model_grads, trainable_model_variables, self._model_optimizer)
-
-    total_loss = model_loss
-
-    extra = WorldModelLossInfo(model_loss=model_loss)
-
-    return tf_agent.LossInfo(loss=total_loss, extra=extra)
+    return model_loss
 
   def _train(self, experience, weights=None):
     """Train both the inner sac agent with the sequential latent model."""
-
-    self.train_step_counter.assign_add(1)
-    return self.train_model(experience, weights)
     
-    # # Get the sequence with shape [B,T,...]
-    # time_steps, actions, next_time_steps = self._experience_to_transitions(
-    #     experience)
-    # # Get the last transition (s,a,s') with shape [B,1,...]
-    # time_step, action, next_time_step = self._experience_to_transitions(
-    #     tf.nest.map_structure(lambda x: x[:, -2:], experience))
-    # # Squeeze to shape [B,...]
-    # time_step, action, next_time_step = tf.nest.map_structure(
-    #     lambda x: tf.squeeze(x, axis=1), (time_step, action, next_time_step))
+    # Get the sequence with shape [B,T,...]
+    time_steps, actions, next_time_steps = self._experience_to_transitions(
+        experience)
+    # Get the last transition (s,a,s') with shape [B,1,...]
+    time_step, action, next_time_step = self._experience_to_transitions(
+        tf.nest.map_structure(lambda x: x[:, -2:], experience))
+    # Squeeze to shape [B,...]
+    time_step, action, next_time_step = tf.nest.map_structure(
+        lambda x: tf.squeeze(x, axis=1), (time_step, action, next_time_step))
 
-    # # If persistent=False, can only require gradient for one time.
-    # # If watch_accessed_variables=False, must indicate which variables to request gradient
-    # with tf.GradientTape() as tape:
-    #   # Sample the latent from model network
-    #   images = experience.observation
-      
-    #   latent_samples_and_dists = self._model_network.sample_posterior(
-    #       images, actions, experience.step_type) # z, p(z|x)
-    #   latents, _ = latent_samples_and_dists
-    #   if isinstance(latents, (tuple, list)):
-    #     latents = tf.concat(latents, axis=-1)
-    #   # Shape [B,...]
-    #   latent, next_latent = tf.unstack(latents[:, -2:], axis=1)
+    # Sample the latent from model network
+    images = experience.observation
+    
+    latents_with_reward = self._model_network.sample_z_sequence(
+      images=images,
+      actions=actions,
+      rewards=experience.reward,
+      step_types=experience.step_type,
+    )
+    if isinstance(latents_with_reward, (tuple, list)):
+      latents_with_reward = tf.concat(latents_with_reward, axis=-1)
+    # Shape [B,...]
+    latent, next_latent = tf.unstack(latents_with_reward[:, -2:], axis=1)
 
-    #   model_loss = self.model_loss(
-    #       images,
-    #       experience.action,
-    #       experience.step_type,
-    #       latent_posterior_samples_and_dists=latent_samples_and_dists,
-    #       weights=weights)
+    latent_experience = trajectory.Trajectory(
+      step_type=experience.step_type,
+      observation=tf.stop_gradient(latents_with_reward),
+      action=experience.action,
+      policy_info=experience.policy_info,
+      next_step_type=experience.next_step_type,
+      reward=experience.reward,
+      discount=experience.discount)
 
-    # tf.debugging.check_numerics(model_loss, 'Model loss is inf or nan.')
-    # trainable_model_variables = self._model_network.trainable_variables
-    # assert trainable_model_variables, ('No trainable model variables to '
-    #                                       'optimize.')
-    # model_grads = tape.gradient(model_loss, trainable_model_variables)
-    # self._apply_gradients(model_grads, trainable_model_variables, self._model_optimizer)
+    # latent_experience = latent_experience[:, -2:]
+    latent_experience = tf.nest.map_structure(lambda x: x[:, -2:], latent_experience)
 
-    # latent_experience = trajectory.Trajectory(
-    #   step_type=experience.step_type,
-    #   observation=tf.stop_gradient(latents),
-    #   action=experience.action,
-    #   policy_info=experience.policy_info,
-    #   next_step_type=experience.next_step_type,
-    #   reward=experience.reward,
-    #   discount=experience.discount)
+    controller_loss = self._inner_agent.train(latent_experience, weights).loss
 
-    # # latent_experience = latent_experience[:, -2:]
-    # latent_experience = tf.nest.map_structure(lambda x: x[:, -2:], latent_experience)
-
-    # total_loss = model_loss
-
-    # extra = WorldModelLossInfo(model_loss=model_loss)
-
-    # return tf_agent.LossInfo(loss=total_loss, extra=extra)
+    return tf_agent.LossInfo(loss=controller_loss, extra=None)
 
   def _apply_gradients(self, gradients, variables, optimizer):
     grads_and_vars = list(zip(gradients, variables))
