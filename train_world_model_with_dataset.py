@@ -20,6 +20,7 @@ from collections import OrderedDict
 import glob
 from tqdm import tqdm
 
+from tf_agents.utils import common
 
 import gym
 import gym_carla
@@ -209,7 +210,13 @@ def compute_summaries(valid_dataset,
       prev_z = z
       is_first = False
     else:
-      (log_pi, mu, log_sigma), rew_pred, (state_h, state_c) = model_net.memory.pred(tf.expand_dims(prev_z, axis=0), prev_action, prev_rew, state_h, state_c, return_state=True)
+      (log_pi, mu, log_sigma), rew_pred, (state_h, state_c) = model_net.memory.pred(
+        input_z=tf.expand_dims(prev_z, axis=0),
+        input_action=prev_action,
+        prev_rew=prev_rew,
+        input_state_h=state_h,
+        input_state_c=state_c,
+        return_state=True)
       z_pred = model_net.memory.sample_z(log_pi, mu, log_sigma)
       z_pred = tf.expand_dims(z_pred, axis=0)
       recon = model_net.vision.decode(z_pred)

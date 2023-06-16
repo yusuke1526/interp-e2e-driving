@@ -193,6 +193,7 @@ def collect_dataset(
     tf_agent = world_model_agent.WorldModelAgent(
         time_step_spec,
         action_spec,
+        inner_agent=None,
         model_network=model_net,
         model_optimizer=tf.compat.v1.train.AdamOptimizer(
             learning_rate=model_learning_rate),
@@ -216,7 +217,7 @@ def collect_dataset(
     tfrecords = [p for p in sorted(list(glob.glob(os.path.join(root_dir, 'dataset.tfrecord.*')))) if 'spec' not in p]
     latent_num = int(tfrecords[-1].split('.')[-1])
 
-    for i in range(latent_num, latent_num+num_iteration):
+    for i in range(latent_num+1, latent_num+1 + num_iteration):
         # Get tfrecord observer
         trajectory_spec = tf_agent.collect_data_spec
         dataset_path = os.path.join(root_dir, f'dataset.tfrecord.{i}')
