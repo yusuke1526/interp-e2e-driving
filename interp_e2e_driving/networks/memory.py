@@ -33,12 +33,21 @@ class MemoryModel(tf.Module):
     # self.prior = self.init_prior_distribution()
     self.prior = tfd.MultivariateNormalDiag
 
-  def pred(self, input_z, input_action, prev_rew, state_input_h=None, state_input_c=None, return_state=False):
+  def get_rnn_output(self, input_z, input_action, prev_rew, state_input_h=None, state_input_c=None):
     input = tf.concat((input_z, input_action, prev_rew), axis=-1)
     if (state_input_h is None) or (state_input_h is None):
       rnn_output, state_h, state_c = self.rnn(input)
     else:
       rnn_output, state_h, state_c = self.rnn(input, initial_state=[state_input_h, state_input_c])
+
+    return rnn_output, state_h, state_c
+  
+  def pred(self, input_z, input_action, prev_rew, step_types=None, state_input_h=None, state_input_c=None, return_state=False):
+    # sequence_length = step_types.shape[1] - 1 TODO: implement transition depending on initial state
+    # reset_mask = tf.equal(step_types, ts.StepType.FIRST)
+    # reset_mask = tf.expand_dims(reset_mask, axis=-1)
+
+    rnn_output, state_h, state_c = self.get_rnn_output(input_z, input_action, prev_rew, state_input_h, state_input_c)
     mdn_output = self.mdn(rnn_output)
 
     z_pred = mdn_output[:, :, :-1]
@@ -46,7 +55,7 @@ class MemoryModel(tf.Module):
 
     log_pi, mu, log_sigma = self.get_mixture_coef(z_pred)
 
-    rew_pred = mdn_output[:, :, -1]
+    rew_pred = mdn_output[:, :, -1:]
 
     if return_state:
       return (log_pi, mu, log_sigma), rew_pred, (state_h, state_c)
@@ -97,9 +106,9 @@ class MemoryModel(tf.Module):
     return z_loss
 
   def rew_loss(self, y_pred, y_true):
-    rew_pred = y_pred
-    rew_true = y_true[:, :, -1]
-    rew_loss =  tf.keras.metrics.binary_crossentropy(rew_true, rew_pred, from_logits = True)
+    rew_pred = tf.sigmoid(y_pred)
+    rew_true = tf.sigmoid(y_true[:, :, -1])
+    rew_loss =  tf.keras.backend.binary_crossentropy(rew_true, rew_pred)
     
     rew_loss = tf.reduce_mean(rew_loss)
 
@@ -119,20 +128,6 @@ class MemoryModel(tf.Module):
   
   def init_prior_distribution(self):
     return None #TODO
-  
-  # def sample_z(self, log_pis, mus, log_sigmas):
-  #   '''
-  #   inputs: (latent_size, N)
-  #   '''
-  #   idx = tfd.Categorical(logits=log_pis).sample()
-  #   sampled_z = []
-  #   for log_pi, mu, log_sigma in zip(log_pis, mus, log_sigmas):
-  #     epsilon = tf.keras.backend.random_normal(shape=[], mean=0., stddev=1.)
-  #     idx = tfd.Categorical(logits=log_pi).sample()
-  #     z = mu[idx] + tf.math.exp(log_sigma[idx]) * epsilon
-  #     sampled_z.append(z)
-
-  #   return tf.stack(sampled_z, axis=0)
   
   def sample_z(self, log_pis, mus, log_sigmas):
     '''
