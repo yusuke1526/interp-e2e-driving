@@ -215,9 +215,10 @@ def collect_dataset(
     )
 
     tfrecords = [p for p in sorted(list(glob.glob(os.path.join(root_dir, 'dataset.tfrecord.*')))) if 'spec' not in p]
-    latent_num = int(tfrecords[-1].split('.')[-1])
+    latest_num = int(tfrecords[-1].split('.')[-1])
+    print(f'latest_num: {latest_num}')
 
-    for i in range(latent_num+1, latent_num+1 + num_iteration):
+    for i in range(latest_num+1, latest_num+1 + num_iteration):
         # Get tfrecord observer
         trajectory_spec = tf_agent.collect_data_spec
         dataset_path = os.path.join(root_dir, f'dataset.tfrecord.{i}')

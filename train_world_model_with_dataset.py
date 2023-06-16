@@ -214,8 +214,8 @@ def compute_summaries(valid_dataset,
         input_z=tf.expand_dims(prev_z, axis=0),
         input_action=prev_action,
         prev_rew=prev_rew,
-        input_state_h=state_h,
-        input_state_c=state_c,
+        state_input_h=state_h,
+        state_input_c=state_c,
         return_state=True)
       z_pred = model_net.memory.sample_z(log_pi, mu, log_sigma)
       z_pred = tf.expand_dims(z_pred, axis=0)
