@@ -33,16 +33,21 @@ class MemoryModel(tf.Module):
     # self.prior = self.init_prior_distribution()
     self.prior = tfd.MultivariateNormalDiag
 
-  def pred(self, input_z, input_action, prev_rew, step_types=None, state_input_h=None, state_input_c=None, return_state=False):
-    # sequence_length = step_types.shape[1] - 1 TODO: implement transition depending on initial state
-    # reset_mask = tf.equal(step_types, ts.StepType.FIRST)
-    # reset_mask = tf.expand_dims(reset_mask, axis=-1)
-
+  def get_rnn_output(self, input_z, input_action, prev_rew, state_input_h=None, state_input_c=None):
     input = tf.concat((input_z, input_action, prev_rew), axis=-1)
     if (state_input_h is None) or (state_input_h is None):
       rnn_output, state_h, state_c = self.rnn(input)
     else:
       rnn_output, state_h, state_c = self.rnn(input, initial_state=[state_input_h, state_input_c])
+
+    return rnn_output, state_h, state_c
+  
+  def pred(self, input_z, input_action, prev_rew, step_types=None, state_input_h=None, state_input_c=None, return_state=False):
+    # sequence_length = step_types.shape[1] - 1 TODO: implement transition depending on initial state
+    # reset_mask = tf.equal(step_types, ts.StepType.FIRST)
+    # reset_mask = tf.expand_dims(reset_mask, axis=-1)
+
+    rnn_output, state_h, state_c = self.get_rnn_output(input_z, input_action, prev_rew, state_input_h, state_input_c)
     mdn_output = self.mdn(rnn_output)
 
     z_pred = mdn_output[:, :, :-1]

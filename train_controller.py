@@ -427,6 +427,9 @@ def train_controller(
       batch_size=model_batch_size,
       )
     
+    # not train world model
+    model_net.trainable = False
+    
     # load world model params
     best_loss = tf.Variable(float('inf'))
     model_checkpointer = common.Checkpointer(
@@ -440,7 +443,9 @@ def train_controller(
     model_checkpointer.initialize_or_restore()
 
     # Get the latent spec
-    latent_observation_spec = tensor_spec.TensorSpec((latent_size+1,), dtype=tf.float32)
+    # rnn_state_size = latent_size + action_spec.shape[0] + 1 # 1 is for reward
+    # latent_observation_spec = tensor_spec.TensorSpec((latent_size+rnn_state_size,), dtype=tf.float32)
+    latent_observation_spec = tensor_spec.TensorSpec((latent_size,), dtype=tf.float32)
     latent_time_step_spec = ts.time_step_spec(observation_spec=latent_observation_spec)
 
     # Get actor and critic net

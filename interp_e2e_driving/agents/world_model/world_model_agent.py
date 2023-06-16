@@ -92,35 +92,42 @@ class WorldModelAgent(tf_agent.TFAgent):
     return model_loss
 
   def _train(self, experience, weights=None):
-    """Train both the inner sac agent with the sequential latent model."""
-    
-    # Get the sequence with shape [B,T,...]
-    time_steps, actions, next_time_steps = self._experience_to_transitions(
-        experience)
-    # Get the last transition (s,a,s') with shape [B,1,...]
-    time_step, action, next_time_step = self._experience_to_transitions(
-        tf.nest.map_structure(lambda x: x[:, -2:], experience))
-    # Squeeze to shape [B,...]
-    time_step, action, next_time_step = tf.nest.map_structure(
-        lambda x: tf.squeeze(x, axis=1), (time_step, action, next_time_step))
+    """Train inner sac agent."""
 
     # Sample the latent from model network
     images = experience.observation
-    
-    latents_with_reward = self._model_network.sample_z_sequence(
-      images=images,
-      actions=actions,
-      rewards=experience.reward,
-      step_types=experience.step_type,
-    )
-    if isinstance(latents_with_reward, (tuple, list)):
-      latents_with_reward = tf.concat(latents_with_reward, axis=-1)
-    # Shape [B,...]
-    latent, next_latent = tf.unstack(latents_with_reward[:, -2:], axis=1)
+    actions = experience.action
+    rewards = experience.reward
+    step_types = experience.step_type
+
+    # sample first latent from only observation and the others from observation and actions
+    sequence_length = step_types.shape[1] - 1
+    prev_images = {name: image_sequence[:, :sequence_length] for name, image_sequence in images.items()}
+    prev_actions = actions[:, :sequence_length]
+    if len(rewards.shape) == 2:
+      rewards = tf.expand_dims(rewards, axis=-1)
+    prev_rewards = rewards[:, :sequence_length]
+    step_types = step_types[:, :sequence_length]
+
+    # Compuate the latents
+    # _, _, zs = self._model_network.vision.encode_sequence(images)
+    # prev_zs = zs[:, :-1]
+    # rnn_output, _, _ = self._model_network.memory.get_rnn_output(
+    #   input_z=prev_zs,
+    #   input_action=prev_actions,
+    #   prev_rew=prev_rewards,
+    # )
+    # rnn_output = tf.concat([tf.zeros((rnn_output.shape[0], 1, rnn_output.shape[2])), rnn_output], axis=1)
+
+    # latents = tf.concat([zs, rnn_output], axis=-1)
+    _, _, latents = self._model_network.vision.encode_sequence(images)
+
+    if isinstance(latents, (tuple, list)):
+      latents = tf.concat(latents, axis=-1)
 
     latent_experience = trajectory.Trajectory(
       step_type=experience.step_type,
-      observation=tf.stop_gradient(latents_with_reward),
+      observation=tf.stop_gradient(latents),
       action=experience.action,
       policy_info=experience.policy_info,
       next_step_type=experience.next_step_type,
