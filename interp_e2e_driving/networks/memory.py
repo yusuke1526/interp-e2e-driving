@@ -34,15 +34,29 @@ class MemoryModel(tf.Module):
     self.prior = tfd.MultivariateNormalDiag
 
   def get_rnn_output(self, input_z, input_action, prev_rew, state_input_h=None, state_input_c=None):
-    input = tf.concat((input_z, input_action, prev_rew), axis=-1)
-    if (state_input_h is None) or (state_input_h is None):
+    if (input_action is None) or prev_rew is None:
+      input_action = tf.zeros((input_z.shape[0], input_z.shape[1], self.action_size))
+      prev_rew = tf.zeros((input_z.shape[0], input_z.shape[1], 1))
+    input = [input_z, input_action, prev_rew]
+
+    for i in range(len(input)):
+      if len(input[i].shape) == 1:
+        input[i] = tf.expand_dims(input[i], axis=0)
+      if len(input[i].shape) == 2:
+        input[i] = tf.expand_dims(input[i], axis=1)
+
+    input = tf.concat(input, axis=-1)
+    if (state_input_h is None) or (state_input_c is None):
       rnn_output, state_h, state_c = self.rnn(input)
     else:
       rnn_output, state_h, state_c = self.rnn(input, initial_state=[state_input_h, state_input_c])
 
     return rnn_output, state_h, state_c
   
-  def pred(self, input_z, input_action, prev_rew, step_types=None, state_input_h=None, state_input_c=None, return_state=False):
+  def pred(self, input_z, input_action=None, prev_rew=None, step_types=None, state_input_h=None, state_input_c=None, return_state=False):
+    '''
+    q(z_{t+1}|z_t, a_t, r_t)
+    '''
     # sequence_length = step_types.shape[1] - 1 TODO: implement transition depending on initial state
     # reset_mask = tf.equal(step_types, ts.StepType.FIRST)
     # reset_mask = tf.expand_dims(reset_mask, axis=-1)
@@ -61,24 +75,6 @@ class MemoryModel(tf.Module):
       return (log_pi, mu, log_sigma), rew_pred, (state_h, state_c)
     
     return (log_pi, mu, log_sigma), rew_pred
-  
-  def compute_sequence_loss(self, y_preds, y_trues):
-    '''
-    args:
-      y_preds: (
-        log_pis: (B, T, latent_size),
-        mus: (B, T, latent_size),
-        log_sigmas: (B, T, latent_size)
-        ),
-        rew_pred: (B, T, 1)
-      y_trues: (B, T, latent_size + 1)
-    return:
-      loss
-    '''
-    rew_preds = tf.reshape(y_preds[-1], (-1, 1))
-    dists = tuple(map(lambda x: tf.reshape(x, (-1, self.latent_size)), y_preds[0]))
-    return self.compute_loss(dists, rew_preds)
-
 
   def compute_loss(self, y_pred, y_true):
     '''
@@ -107,7 +103,7 @@ class MemoryModel(tf.Module):
 
   def rew_loss(self, y_pred, y_true):
     rew_pred = tf.sigmoid(y_pred)
-    rew_true = tf.sigmoid(y_true[:, :, -1])
+    rew_true = tf.sigmoid(y_true[:, :, -1:])
     rew_loss =  tf.keras.backend.binary_crossentropy(rew_true, rew_pred)
     
     rew_loss = tf.reduce_mean(rew_loss)
