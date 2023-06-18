@@ -20,11 +20,27 @@ import glob
 import gym
 import gym_carla
 
+from tf_agents.agents.ddpg import critic_network
+from tf_agents.agents.dqn import dqn_agent
+from tf_agents.agents.ppo import ppo_agent
+from tf_agents.agents.sac import sac_agent
+from tf_agents.agents.td3 import td3_agent
 from tf_agents.drivers import dynamic_step_driver
 from tf_agents.environments import gym_wrapper
 from tf_agents.environments import tf_py_environment
 from tf_agents.environments import wrappers
+from tf_agents.eval import metric_utils
+from tf_agents.metrics import tf_metrics
+from tf_agents.networks import actor_distribution_network
+from tf_agents.networks import actor_distribution_rnn_network
+from tf_agents.networks import normal_projection_network
+from tf_agents.networks import q_rnn_network
+from tf_agents.networks import value_rnn_network
+from tf_agents.policies import random_tf_policy
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
+from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import time_step as ts
+from tf_agents.trajectories import trajectory
 from tf_agents.utils import common, example_encoding_dataset
 from tf_agents.policies import random_tf_policy
 
@@ -74,7 +90,7 @@ def load_carla_env(
         pixor_size=64,
         pixor=False,
         obs_channels=None,
-        auto_exploration=True,
+        auto_exploration=False,
         action_repeat=1):
     """Loads train and eval environments."""
     env_params = {
@@ -126,6 +142,19 @@ def load_carla_env(
     return py_env, eval_py_env
 
 
+def normal_projection_net(action_spec,
+                          init_action_stddev=0.35,
+                          init_means_output_factor=0.1):
+  del init_action_stddev
+  return normal_projection_network.NormalProjectionNetwork(
+      action_spec,
+      mean_transform=None,
+      state_dependent_std=True,
+      init_means_output_factor=init_means_output_factor,
+      std_transform=sac_agent.std_clip_transform,
+      scale_distribution=True)
+
+
 @gin.configurable
 def collect_dataset(
     root_dir,
@@ -138,14 +167,31 @@ def collect_dataset(
     initial_collect_steps=int(1e5),
     replay_buffer_capacity=int(1e5),
     num_iteration=5,
+    actor_fc_layers=(256, 256),
+    critic_obs_fc_layers=None,
+    critic_action_fc_layers=None,
+    critic_joint_fc_layers=(256, 256),
+    auto_exploration=False,
+    # Params for target update
+    target_update_tau=0.005,
+    target_update_period=1,
     # Params for train
     batch_size=256,
     model_batch_size=32,  # model training batch size
     sequence_length=4,  # number of timesteps to train model
     model_learning_rate=1e-4,  # learning rate for model training
     gradient_clipping=None,
+    train_steps_per_iteration=1,
+    initial_model_train_steps=100000,  # initial model training
+    actor_learning_rate=3e-4,
+    critic_learning_rate=3e-4,
+    alpha_learning_rate=3e-4,
+    td_errors_loss_fn=tf.losses.mean_squared_error,
+    gamma=0.99,
+    reward_scale_factor=1.0,
     # Params for summaries and logging
     num_images_per_summary=1,  # images for each summary
+    debug_summaries=False,
     summarize_grads_and_vars=False,
     gpu_allow_growth=True,  # GPU memory growth
     gpu_memory_limit=None,  # GPU memory limit
@@ -169,7 +215,7 @@ def collect_dataset(
     global_step = tf.compat.v1.train.get_or_create_global_step()
 
     # Create Carla environment
-    py_env, eval_py_env = load_carla_env(env_name='carla-v0', obs_channels=input_names+mask_names, action_repeat=action_repeat)
+    py_env, eval_py_env = load_carla_env(env_name='carla-v0', obs_channels=input_names+mask_names, action_repeat=action_repeat, auto_exploration=auto_exploration)
 
     tf_env = tf_py_environment.TFPyEnvironment(py_env)
     fps = int(np.round(1.0 / (py_env.dt * action_repeat)))
@@ -189,11 +235,51 @@ def collect_dataset(
         latent_size=latent_size
     )
 
+    # Get the latent spec
+    rnn_state_size = latent_size + action_spec.shape[0] + 1 # 1 is for reward
+    latent_observation_spec = tensor_spec.TensorSpec((latent_size+rnn_state_size,), dtype=tf.float32)
+    # latent_observation_spec = tensor_spec.TensorSpec((latent_size,), dtype=tf.float32)
+    latent_time_step_spec = ts.time_step_spec(observation_spec=latent_observation_spec)
+
+    # Get actor and critic net
+    actor_net = actor_distribution_network.ActorDistributionNetwork(
+        latent_observation_spec,
+        action_spec,
+        fc_layer_params=actor_fc_layers,
+        continuous_projection_net=normal_projection_net)
+    critic_net = critic_network.CriticNetwork(
+        (latent_observation_spec, action_spec),
+        observation_fc_layer_params=critic_obs_fc_layers,
+        action_fc_layer_params=critic_action_fc_layers,
+        joint_fc_layer_params=critic_joint_fc_layers)
+
+    # Build the inner SAC agent based on latent space
+    inner_agent = sac_agent.SacAgent(
+        latent_time_step_spec,
+        action_spec,
+        actor_network=actor_net,
+        critic_network=critic_net,
+        actor_optimizer=tf.compat.v1.train.AdamOptimizer(
+            learning_rate=actor_learning_rate),
+        critic_optimizer=tf.compat.v1.train.AdamOptimizer(
+            learning_rate=critic_learning_rate),
+        alpha_optimizer=tf.compat.v1.train.AdamOptimizer(
+            learning_rate=alpha_learning_rate),
+        target_update_tau=target_update_tau,
+        target_update_period=target_update_period,
+        td_errors_loss_fn=td_errors_loss_fn,
+        gamma=gamma,
+        reward_scale_factor=reward_scale_factor,
+        gradient_clipping=gradient_clipping,
+        debug_summaries=debug_summaries,
+        summarize_grads_and_vars=summarize_grads_and_vars,
+        train_step_counter=global_step)
+
     # Build the latent sac agent
     tf_agent = world_model_agent.WorldModelAgent(
         time_step_spec,
         action_spec,
-        inner_agent=None,
+        inner_agent=inner_agent,
         model_network=model_net,
         model_optimizer=tf.compat.v1.train.AdamOptimizer(
             learning_rate=model_learning_rate),
@@ -207,17 +293,19 @@ def collect_dataset(
         fps=fps)
 
     # Get policies
-    # initial_collect_policy = autopilot_policy.AutopilotPolicy(
-    #     time_step_spec, action_spec, py_env)
-    initial_collect_policy = random_tf_policy.RandomTFPolicy(
-        time_step_spec=time_step_spec,
-        action_spec=action_spec,
-    )
+    if auto_exploration:
+        initial_collect_policy = autopilot_policy.AutopilotPolicy(
+            time_step_spec, action_spec, py_env)
+    else:
+        initial_collect_policy = random_tf_policy.RandomTFPolicy(
+            time_step_spec=time_step_spec,
+            action_spec=action_spec,
+        )
 
     tfrecords = [p for p in sorted(list(glob.glob(os.path.join(root_dir, 'dataset.tfrecord.*')))) if 'spec' not in p]
-    latent_num = int(tfrecords[-1].split('.')[-1])
+    latest_num = int(tfrecords[-1].split('.')[-1]) if len(tfrecords) > 0 else 0
 
-    for i in range(latent_num+1, latent_num+1 + num_iteration):
+    for i in range(latest_num, latest_num+num_iteration):
         # Get tfrecord observer
         trajectory_spec = tf_agent.collect_data_spec
         dataset_path = os.path.join(root_dir, f'dataset.tfrecord.{i}')
