@@ -33,52 +33,33 @@ class MemoryModel(tf.Module):
     # self.prior = self.init_prior_distribution()
     self.prior = tfd.MultivariateNormalDiag
 
-  def pred_sequence(self, input_zs, input_actions, prev_rews, state_input_hs=None, state_input_cs=None):
-    '''
-    args:
-      input_zs: (B, T, latent_size),
-      input_actions: (B, T, action_size),
-      prev_rews: (B, T, 1),
-      state_input: (B, T, latent_size+action_size+1)
-
-    return:
-      z_preds: (
-        log_pis: (B, T, latent_size),
-        mus: (B, T, latent_size),
-        log_sigmas: (B, T, latent_size)
-        ),
-        rew_pred: (B, T, 1)
-    '''
-    batch_size, sequence_length = list(input_zs.shape[:2])
-    size = batch_size * sequence_length
-    reshape = functools.partial(tf.reshape, shape=(size, -1))
-    input_zs = reshape(input_zs)
-    input_actions = reshape(input_actions)
-    prev_rews = reshape(prev_rews)
-    state_input_hs = reshape(state_input_hs) if state_input_hs else None
-    state_input_cs = reshape(state_input_cs) if state_input_cs else None
-
-    dists, rew_pred = self.pred(input_zs, input_actions, prev_rews, state_input_hs, state_input_cs)
-    reshape = functools.partial(tf.reshape, shape=(batch_size, sequence_length, -1))
-    return tuple(map(reshape, dists)), reshape(rew_pred)
-
-  def pred(self, input_z, input_action, prev_rew, state_input_h=None, state_input_c=None):
+  def get_rnn_output(self, input_z, input_action, prev_rew, state_input_h=None, state_input_c=None):
     input = tf.concat((input_z, input_action, prev_rew), axis=-1)
-    if state_input_h is not None and state_input_c is not None:
-      rnn_output, state_h, state_c = self.rnn(input, initial_state=[state_input_h, state_input_c])
-    else:
+    if (state_input_h is None) or (state_input_h is None):
       rnn_output, state_h, state_c = self.rnn(input)
-    # print(f'rnn_output.shape: {rnn_output.shape}')
+    else:
+      rnn_output, state_h, state_c = self.rnn(input, initial_state=[state_input_h, state_input_c])
+
+    return rnn_output, state_h, state_c
+  
+  def pred(self, input_z, input_action, prev_rew, step_types=None, state_input_h=None, state_input_c=None, return_state=False):
+    # sequence_length = step_types.shape[1] - 1 TODO: implement transition depending on initial state
+    # reset_mask = tf.equal(step_types, ts.StepType.FIRST)
+    # reset_mask = tf.expand_dims(reset_mask, axis=-1)
+
+    rnn_output, state_h, state_c = self.get_rnn_output(input_z, input_action, prev_rew, state_input_h, state_input_c)
     mdn_output = self.mdn(rnn_output)
-    # print(f'mdn_output.shape: {mdn_output.shape}')
 
     z_pred = mdn_output[:, :, :-1]
     z_pred = tf.reshape(z_pred, (-1, 3 * self.gaussian_mixtures))
 
-    log_pi, mu, log_sigma = self.get_mixture_coef(z_pred)    
+    log_pi, mu, log_sigma = self.get_mixture_coef(z_pred)
 
-    rew_pred = mdn_output[:, :, -1]
+    rew_pred = mdn_output[:, :, -1:]
 
+    if return_state:
+      return (log_pi, mu, log_sigma), rew_pred, (state_h, state_c)
+    
     return (log_pi, mu, log_sigma), rew_pred
   
   def compute_sequence_loss(self, y_preds, y_trues):
@@ -109,7 +90,7 @@ class MemoryModel(tf.Module):
     z_loss = self.z_loss(z_pred, y_true)
     rew_loss = self.rew_loss(rew_pred, y_true)
 
-    return self.z_factor * z_loss + self.rew_factor * rew_loss
+    return self.z_factor * z_loss + self.rew_factor * rew_loss, z_loss, rew_loss
 
   def z_loss(self, y_pred, y_true):
     log_pi, mu, log_sigma = y_pred
@@ -125,9 +106,9 @@ class MemoryModel(tf.Module):
     return z_loss
 
   def rew_loss(self, y_pred, y_true):
-    rew_pred = y_pred
-    rew_true = y_true[:, :, -1]
-    rew_loss =  tf.keras.metrics.binary_crossentropy(rew_true, rew_pred, from_logits = True)
+    rew_pred = tf.sigmoid(y_pred)
+    rew_true = tf.sigmoid(y_true[:, :, -1])
+    rew_loss =  tf.keras.backend.binary_crossentropy(rew_true, rew_pred)
     
     rew_loss = tf.reduce_mean(rew_loss)
 
@@ -148,12 +129,23 @@ class MemoryModel(tf.Module):
   def init_prior_distribution(self):
     return None #TODO
   
-  def sample_z(self, mdn_output):
+  def sample_z(self, log_pis, mus, log_sigmas):
     '''
-    input: (B, gaussian_N, 3, latent_size)
+    inputs: (latent_size, N)
     '''
+    idx = tfd.Categorical(logits=log_pis).sample()
+    mus = self.extract(mus, idx)
+    log_sigmas = self.extract(log_sigmas, idx)
+    epsilon = tf.keras.backend.random_normal(shape=mus.shape[:0], mean=0., stddev=1.)
+    return mus + tf.math.exp(log_sigmas) * epsilon
+  
+  def extract(self, A, IDX):
+    # A : 行列
+    # IDX : index (dtype=tf.int32, int32でない場合はキャストが必要になることがある)
+    _IDX = tf.concat([tf.range(A.shape[0])[:,tf.newaxis], IDX[:,tf.newaxis]], axis=1)
+    subA = tf.gather_nd(A, _IDX)
+    return subA
 
-    return self.prior(loc=mean, scale_diag=std).sample()
   
 if __name__ == '__main__':
   batch_size = 16

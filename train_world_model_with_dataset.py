@@ -20,6 +20,7 @@ from collections import OrderedDict
 import glob
 from tqdm import tqdm
 
+from tf_agents.utils import common
 
 import gym
 import gym_carla
@@ -152,54 +153,86 @@ def compute_summaries(valid_dataset,
                       train_step=None,
                       summary_writer=None,
                       model_net=None,
-                      num_episodes_to_render=1,
+                      num_episodes_to_render=2,
                       num_steps_to_render=100,
                       image_keys=None,
                       fps=10,
                       ):
 
-  kl_divergence_list = []
-  reconstruction_error_list_dict = {name: [] for name in model_net.reconstruct_names}
-  total_loss_list = []
+  error_list_dict = {}
   for experience in valid_dataset:
     images = experience.observation
-    kl_divergence, reconstruction_error_dict, total_loss = model_net.vision.compute_sequence_loss(images)
-    kl_divergence_list.append(kl_divergence)
-    for name in model_net.reconstruct_names:
-      reconstruction_error_list_dict[name].append(reconstruction_error_dict[name])
-    total_loss_list.append(total_loss)
+    actions = experience.action
+    rewards = experience.reward
+    step_types = experience.step_type
+    total_loss, outputs = model_net.compute_loss(images, actions, rewards, step_types)
+    for k, v in outputs.items():
+      if k in error_list_dict.keys():
+        error_list_dict[k].append(v)
+      else:
+        error_list_dict[k] = [v]
 
-  loss_dict = dict()
-  loss_dict['kl_divergence'] = np.array(kl_divergence_list).mean()
-  for name in model_net.reconstruct_names:
-    loss_dict[f'reconstruction_error_{name}'] = np.array(reconstruction_error_list_dict[name]).mean()
-  loss_dict['total_loss'] = np.array(total_loss_list).mean()
+  error_list_dict = {k: np.array(v).mean() for k, v in error_list_dict.items()}
 
   # Summarize scalars to tensorboard
   if train_step and summary_writer:
     with summary_writer.as_default():
-      for name, loss in loss_dict.items():
+      for name, loss in error_list_dict.items():
         tf.compat.v2.summary.scalar(name='model_loss/'+name, data=loss, step=train_step)
 
   # generate video from sequence dataset
   valid_dataset = valid_dataset.flat_map(lambda x: tf.data.Dataset.from_tensor_slices(x)) # (B, T, w, h, c) -> (T, w, h, c)
   valid_dataset = valid_dataset.flat_map(lambda x: tf.data.Dataset.from_tensor_slices(x)).batch(1) # (T, w, h, c) -> (1, w, h, c)
   iterator = iter(valid_dataset)
-  images = [[0] * num_steps_to_render] * num_episodes_to_render
-  reconstruct_images = [[0] * num_steps_to_render] * num_episodes_to_render
-  for i in range(num_episodes_to_render):
-    for j in range(num_steps_to_render):
-      experience = next(iterator)
-      obs = experience.observation
-      images[i][j] = OrderedDict(obs)
-      z_mean, z_log_var, z = model_net.vision.encode(obs)
-      recon = model_net.vision.decode(z)
-      reconstruct_images[i][j] = OrderedDict(recon)
+  images = [[]]
+  reconstruct_images = [[]]
+  reconstruct_images_from_latents = [[]]
+  episode = 0
+  is_first = True
+  while episode < num_episodes_to_render:
+    experience = next(iterator)
+
+    if (episode < num_episodes_to_render) and experience.is_boundary():
+      images.append([])
+      reconstruct_images.append([])
+      reconstruct_images_from_latents.append([])
+      is_first = True
+
+    obs = experience.observation
+    images[-1].append(OrderedDict(obs))
+    z_mean, z_log_var, z = model_net.vision.encode(obs)
+    recon = model_net.vision.decode(z)
+    reconstruct_images[-1].append(OrderedDict(recon))
+
+    # reconstruct_images_from_latents
+    if is_first:
+      state_h, state_c = None, None
+      prev_z = z
+      is_first = False
+    else:
+      (log_pi, mu, log_sigma), rew_pred, (state_h, state_c) = model_net.memory.pred(
+        input_z=tf.expand_dims(prev_z, axis=0),
+        input_action=prev_action,
+        prev_rew=prev_rew,
+        input_state_h=state_h,
+        input_state_c=state_c,
+        return_state=True)
+      z_pred = model_net.memory.sample_z(log_pi, mu, log_sigma)
+      z_pred = tf.expand_dims(z_pred, axis=0)
+      recon = model_net.vision.decode(z_pred)
+      prev_z = z_pred
+    reconstruct_images_from_latents[-1].append(OrderedDict(recon))
+
+    if experience.is_last():
+      episode += 1
+    prev_rew = tf.expand_dims(tf.expand_dims(experience.reward, axis=0), axis=0)
+    prev_action = tf.expand_dims(experience.action, axis=0)
   
   images = concat_images(images, image_keys)
   reconstruct_images = concat_images(reconstruct_images, image_keys)
+  reconstruct_images_from_latents = concat_images(reconstruct_images_from_latents, image_keys)
 
-  all_images = tf.concat([images, reconstruct_images], axis=2)
+  all_images = tf.concat([images, reconstruct_images, reconstruct_images_from_latents], axis=2)
 
   # Need to avoid eager here to avoid rasing error
   gif_summary = common.function(gif_utils.gif_summary_v2)
@@ -207,9 +240,10 @@ def compute_summaries(valid_dataset,
   # Summarize to tensorboard
   gif_summary('ObservationVideoEvalPolicy', images, 1, fps)
   gif_summary('ReconstructedVideoEvalPolicy', reconstruct_images, 1, fps)
+  gif_summary('ReconstructedVideoFromLatentsEvalPolicy', reconstruct_images_from_latents, 1, fps)
   gif_summary('ObservationReconstructedVideoEval', all_images, 1, fps)
 
-  return loss_dict['total_loss']
+  return total_loss
 
 
 def concat_images(images, image_keys):
@@ -258,7 +292,7 @@ def get_latent_reconstruction_videos(latents, model_net):
 
 
 @gin.configurable
-def train_vae(
+def train_world_model(
     root_dir,
     experiment_name,  # experiment name
     env_name='carla-v0',
@@ -266,11 +300,15 @@ def train_vae(
     input_names=['camera', 'lidar'],  # names for inputs
     mask_names=['birdeye'],  # names for masks
     latent_size=64,
+    dataset_dir='./logs/carla-v0/collect_dataset',
     # Params for train
     train_steps_per_iteration=1,
     batch_size=256,
     model_learning_rate=1e-4,  # learning rate for model training
     sequence_length=4,  # number of timesteps to train model
+    train_vision_flag=False,
+    train_memory_flag=True,
+    train_controller_flag=False,
     # Params for eval
     eval_interval=10000,
     # Params for summaries and logging
@@ -333,17 +371,19 @@ def train_vae(
       )
 
     # Load dataset from dumped tfrecords with shape [Bxslx...]
-    tfrecords = [p for p in list(glob.glob('./logs/carla-v0/collect_dataset/dataset.tfrecord.*')) if 'spec' not in p]
+    tfrecords = [p for p in sorted(list(glob.glob(os.path.join(dataset_dir, 'dataset.tfrecord.*')))) if 'spec' not in p]
     dataset = example_encoding_dataset.load_tfrecord_dataset(tfrecords[:int(len(tfrecords)*0.8)], num_parallel_reads=1, add_batch_dim=False, as_trajectories=True) \
         .batch(sequence_length+1, drop_remainder=True).batch(batch_size, drop_remainder=True).repeat(-1).prefetch(3)
     valid_dataset = example_encoding_dataset.load_tfrecord_dataset(tfrecords[int(len(tfrecords)*0.8):], num_parallel_reads=1, add_batch_dim=False, as_trajectories=True) \
         .batch(sequence_length+1, drop_remainder=True).batch(batch_size, drop_remainder=True).prefetch(3)
     
     # prepare checkpoint
-    best_loss = float('inf')
+    best_loss = tf.Variable(float('inf'))
     checkpoint = tf.train.Checkpoint(model=model_net, optimizer=optimizer, global_step=global_step, best_loss=best_loss)
     checkpoint_manager = tf.train.CheckpointManager(checkpoint, os.path.join(root_dir, 'checkpoint'), max_to_keep=5, step_counter=global_step)
-    
+    checkpoint_manager.restore_or_initialize()
+    # global_step.assign(0)
+
     total_loss = compute_summaries(
       valid_dataset,
       train_step=global_step,
@@ -360,7 +400,9 @@ def train_vae(
     while global_step.numpy() < num_iterations:
       experience = next(iterator)
       
-      model_net.train(experience, train_flag={'vision': True, 'memory': False, 'controller': False})
+      model_net.train(experience, train_flag={'vision':train_vision_flag,
+                                              'memory': train_memory_flag,
+                                              'controller': train_controller_flag})
 
       # Evaluation
       if global_step.numpy() % eval_interval == 0:
@@ -377,22 +419,16 @@ def train_vae(
       global_step_val = global_step.numpy()
       if global_step_val % train_checkpoint_interval == 0:
         checkpoint_manager.save()
-
-        # best model
-        if total_loss < best_loss:
-          best_loss = total_loss
-          checkpoint.save(os.path.join(root_dir, 'checkpoint', 'best.ckpt'))
         
-
       # update progress bar
       progress_bar.update(1)
-      progress_bar.set_postfix({'global_step': global_step.numpy()})
+      progress_bar.set_postfix({'total_loss': total_loss.numpy()})
 
 def main(_):
   tf.compat.v1.enable_v2_behavior()
   logging.set_verbosity(logging.INFO)
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
-  train_vae(FLAGS.root_dir, FLAGS.experiment_name)
+  train_world_model(FLAGS.root_dir, FLAGS.experiment_name)
 
 
 if __name__ == '__main__':
