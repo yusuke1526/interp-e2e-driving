@@ -17,6 +17,7 @@ import os
 import tensorflow as tf
 import time
 import collections
+from PIL import Image
 
 import gym
 import gym_carla
@@ -45,11 +46,11 @@ from tf_agents.trajectories import trajectory
 from tf_agents.utils import common
 
 from interp_e2e_driving.agents.ddpg import ddpg_agent
-from interp_e2e_driving.agents.world_model import world_model_agent
+from interp_e2e_driving.agents.latent_sac import latent_sac_agent
 from interp_e2e_driving.environments import filter_observation_wrapper
 from interp_e2e_driving.networks import multi_inputs_actor_rnn_network
 from interp_e2e_driving.networks import multi_inputs_critic_rnn_network
-from interp_e2e_driving.networks import world_model
+from interp_e2e_driving.networks import sequential_latent_network
 from interp_e2e_driving.utils import gif_utils
 
 
@@ -62,6 +63,13 @@ flags.DEFINE_multi_string('gin_param', None, 'Gin binding to pass through.')
 
 FLAGS = flags.FLAGS
 
+def fix_seed(seed):
+    # Numpy
+    np.random.seed(seed)
+    # TensorFlow
+    tf.random.set_seed(seed)
+
+fix_seed(0)
 
 @gin.configurable
 def load_carla_env(
@@ -93,8 +101,9 @@ def load_carla_env(
   pixor_size=64,
   pixor=False,
   obs_channels=None,
-  auto_exploration=False,
-  action_repeat=1):
+  action_repeat=1,
+  eval=True,
+  seed=62):
   """Loads train and eval environments."""
   env_params = {
     'number_of_vehicles': number_of_vehicles,
@@ -122,7 +131,8 @@ def load_carla_env(
     'display_route': display_route,  # whether to render the desired route
     'pixor_size': pixor_size,  # size of the pixor labels
     'pixor': pixor,  # whether to output PIXOR observation
-    'auto_exploration': auto_exploration,
+    'eval': eval,  # when eval is True, agent spawn locations are fixed
+    'seed': seed,  # carla env random seed
   }
 
   gym_spec = gym.spec(env_name)
@@ -142,6 +152,8 @@ def load_carla_env(
   if action_repeat > 1:
     py_env = wrappers.ActionRepeat(py_env, action_repeat)
 
+  # fix_seed(seed)
+
   return py_env, eval_py_env
 
 
@@ -149,12 +161,13 @@ def compute_summaries(metrics,
                       environment,
                       policy,
                       train_step=None,
-                      summary_writer=None,
+                      # summary_writer=None,
                       num_episodes=1,
                       num_episodes_to_render=1,
                       model_net=None,
                       fps=10,
-                      image_keys=None):
+                      image_keys=None,
+                      root_dir=None):
   for metric in metrics:
     metric.reset()
 
@@ -163,8 +176,7 @@ def compute_summaries(metrics,
 
   if num_episodes_to_render:
     images = [[time_step.observation]]  # now images contain dictionary of images
-    assert type(model_net) == world_model.WorldModel, f"not WorldModel, but {type(model_net)}"
-    latents = [[model_net.vision.encode(images[0][0])[-1]]]
+    latents = [[policy_state[1]]]
   else:
     images = []
     latents = []
@@ -185,7 +197,7 @@ def compute_summaries(metrics,
         images.append([])
         latents.append([])
       images[-1].append(next_time_step.observation)
-      latents[-1].append(model_net.vision.encode(next_time_step.observation)[-1])
+      latents[-1].append(policy_state[1])
 
     if traj.is_last():
       episode += 1
@@ -194,33 +206,55 @@ def compute_summaries(metrics,
     time_step = next_time_step
 
   # Summarize scalars to tensorboard
-  if train_step and summary_writer:
-    with summary_writer.as_default():
+  if train_step:
+    with open(os.path.join(root_dir, 'result.txt'), 'w') as f:
       for m in metrics:
         tag = m.name
-        tf.compat.v2.summary.scalar(name=tag, data=m.result(), step=train_step)
+        print(f'{tag}: {m.result()}', file=f)
 
   # Concat input images of different episodes and generate reconstructed images.
   # Shape of images is [[images in episode as timesteps]].
   if type(images[0][0]) is collections.OrderedDict:
-    images = pad_and_concatenate_videos(images, image_keys=image_keys, is_dict=True)
+    images = flatten_videos(images, image_keys=image_keys, is_dict=True)
   else:
-    images = pad_and_concatenate_videos(images, image_keys=image_keys, is_dict=False)
-  images = tf.image.convert_image_dtype([images], tf.uint8, saturate=True)
+    images = flatten_videos(images, image_keys=image_keys, is_dict=False)
+  images = tf.image.convert_image_dtype(images, tf.uint8, saturate=True)
   images = tf.squeeze(images, axis=2)
-  
+
   reconstruct_images = get_latent_reconstruction_videos(latents, model_net)
-  reconstruct_images = tf.image.convert_image_dtype([reconstruct_images], tf.uint8, saturate=True)
+  reconstruct_images = tf.image.convert_image_dtype(reconstruct_images, tf.uint8, saturate=True)
+
+  # Save image files
+  ## Concat observe and reconstruct
+  for i in range(len(images)):
+    gif = np.concatenate([images[i], reconstruct_images[i]], axis=1)
+    save_gif(gif, root_dir, f'episode_{i}.gif', fps)
 
   # Need to avoid eager here to avoid rasing error
   gif_summary = common.function(gif_utils.gif_summary_v2)
 
   # Summarize to tensorboard
-  gif_summary('ObservationVideoEvalPolicy', images, 1, fps)
-  gif_summary('ReconstructedVideoEvalPolicy', reconstruct_images, 1, fps)
+  # gif_summary('ObservationVideoEvalPolicy', images, 1, fps)
+  # gif_summary('ReconstructedVideoEvalPolicy', reconstruct_images, 1, fps)
+
+def save_gif(images, save_dir, file_name, fps=10):
+  save_dir = os.path.join(save_dir, 'gif')
+  if not os.path.exists(save_dir):
+    os.makedirs(save_dir)
+  file_name = os.path.join(save_dir, file_name)
+
+  dicom_list = []
+  for i in range(images.shape[0]):
+      # Numpy配列をImageオブジェクトに変換してリストに追加
+      dicom_list.append(Image.fromarray(np.uint8(images[i])))
+  dicom_list[0].save(file_name, 
+                    save_all=True, append_images=dicom_list[1:],
+                    optimize=False,
+                    duration=1000//fps,
+                    loop=0)
 
 
-def pad_and_concatenate_videos(videos, image_keys, is_dict=False):
+def flatten_videos(videos, image_keys, is_dict=False):
   max_episode_length = max([len(video) for video in videos])
   if is_dict:
     # videos = [[tf.concat(list(dict_obs.values()), axis=2) for dict_obs in video] for video in videos]
@@ -230,8 +264,6 @@ def pad_and_concatenate_videos(videos, image_keys, is_dict=False):
     if len(video) < max_episode_length:
       video.extend(
           [np.zeros_like(video[-1])] * (max_episode_length - len(video)))
-  #　frames is [(each episodes obs at timestep t)]
-  videos = [tf.concat(frames, axis=1) for frames in zip(*videos)]
   return videos
 
 
@@ -248,8 +280,6 @@ def get_latent_reconstruction_videos(latents, model_net):
     if len(video) < max_episode_length:
       video.extend(
           [np.zeros_like(video[-1])] * (max_episode_length - len(video)))
-  #　frames is [(each episodes obs at timestep t)]
-  videos = [tf.concat(frames, axis=0) for frames in zip(*videos)]
   return videos
 
 
@@ -302,7 +332,7 @@ class Preprocessing_Layer(tf.keras.layers.Layer):
 
 
 @gin.configurable
-def train_controller(
+def eval(
     root_dir,
     experiment_name,  # experiment name
     env_name='carla-v0',
@@ -327,7 +357,6 @@ def train_controller(
     dqda_clipping=None,  # for DDPG
     exploration_noise_std=0.1,  # exploration paramter for td3
     actor_update_period=2,  # for td3
-    latent_size=64,
     # Params for collect
     initial_collect_steps=1000,
     collect_steps_per_iteration=1,
@@ -382,9 +411,9 @@ def train_controller(
   root_dir = os.path.join(root_dir, env_name, experiment_name)
 
   # Get summary writers
-  summary_writer = tf.summary.create_file_writer(
-      root_dir, flush_millis=summaries_flush_secs * 1000)
-  summary_writer.set_as_default()
+  # summary_writer = tf.summary.create_file_writer(
+  #     root_dir, flush_millis=summaries_flush_secs * 1000)
+  # summary_writer.set_as_default()
 
   # Eval metrics
   eval_metrics = [
@@ -401,8 +430,12 @@ def train_controller(
   with tf.summary.record_if(
       lambda: tf.math.equal(global_step % summary_interval, 0)):
     # Create Carla environment
-    if agent_name == 'world_model':
+    if agent_name == 'latent_sac':
       py_env, eval_py_env = load_carla_env(env_name='carla-v0', obs_channels=input_names+mask_names, action_repeat=action_repeat)
+    elif agent_name == 'dqn':
+      py_env, eval_py_env = load_carla_env(env_name='carla-v0', discrete=True, obs_channels=input_names, action_repeat=action_repeat)
+    else:
+      py_env, eval_py_env = load_carla_env(env_name='carla-v0', obs_channels=input_names, action_repeat=action_repeat)
 
     tf_env = tf_py_environment.TFPyEnvironment(py_env)
     eval_tf_env = tf_py_environment.TFPyEnvironment(eval_py_env)
@@ -413,271 +446,267 @@ def train_controller(
     observation_spec = time_step_spec.observation
     action_spec = tf_env.action_spec()
 
-    # Get model network for latent sac
-    optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=model_learning_rate)
-    model_net = world_model.WorldModel(
-      input_names=input_names,
-      reconstruct_names=input_names+mask_names,
-      action_size=action_spec.shape[0],
-      gaussian_mixtures=5, # TODO パラメタライズ
-      obs_size=py_env.obs_size,
-      latent_size=latent_size,
-      optimizer=optimizer,
-      train_step_counter=global_step,
-      batch_size=model_batch_size,
-      )
-    
-    # not train world model
-    model_net.trainable = False
-    
-    # load world model params
-    best_loss = tf.Variable(float('inf'))
-    model_checkpointer = common.Checkpointer(
-      ckpt_dir='./logs/carla-v0/memory/checkpoint',
-      model=model_net,
-      optimizer=optimizer,
-      global_step=global_step,
-      best_loss=best_loss,
-      max_to_keep=5
-    )
-    model_checkpointer.initialize_or_restore()
+    ## Make tf agent
+    if agent_name == 'latent_sac':
+      # Get model network for latent sac
+      if model_network_ctor_type == 'hierarchical':
+        model_network_ctor = sequential_latent_network.SequentialLatentModelHierarchical
+      elif model_network_ctor_type == 'non-hierarchical':
+        model_network_ctor = sequential_latent_network.SequentialLatentModelNonHierarchical
+      else:
+        raise NotImplementedError
+      model_net = model_network_ctor(input_names, input_names+mask_names, obs_size=py_env.obs_size)
 
-    # Get the latent spec
-    rnn_state_size = latent_size + action_spec.shape[0] + 1 # 1 is for reward
-    latent_observation_spec = tensor_spec.TensorSpec((latent_size+rnn_state_size,), dtype=tf.float32)
-    # latent_observation_spec = tensor_spec.TensorSpec((latent_size,), dtype=tf.float32)
-    latent_time_step_spec = ts.time_step_spec(observation_spec=latent_observation_spec)
+      # Get the latent spec
+      latent_size = model_net.latent_size
+      latent_observation_spec = tensor_spec.TensorSpec((latent_size,), dtype=tf.float32)
+      latent_time_step_spec = ts.time_step_spec(observation_spec=latent_observation_spec)
 
-    # Get actor and critic net
-    actor_net = actor_distribution_network.ActorDistributionNetwork(
-        latent_observation_spec,
-        action_spec,
-        fc_layer_params=actor_fc_layers,
-        continuous_projection_net=normal_projection_net)
-    critic_net = critic_network.CriticNetwork(
-        (latent_observation_spec, action_spec),
-        observation_fc_layer_params=critic_obs_fc_layers,
-        action_fc_layer_params=critic_action_fc_layers,
-        joint_fc_layer_params=critic_joint_fc_layers)
-    
-    # Build the inner SAC agent based on latent space
-    inner_agent = sac_agent.SacAgent(
-        latent_time_step_spec,
-        action_spec,
-        actor_network=actor_net,
-        critic_network=critic_net,
-        actor_optimizer=tf.compat.v1.train.AdamOptimizer(
-            learning_rate=actor_learning_rate),
-        critic_optimizer=tf.compat.v1.train.AdamOptimizer(
-            learning_rate=critic_learning_rate),
-        alpha_optimizer=tf.compat.v1.train.AdamOptimizer(
-            learning_rate=alpha_learning_rate),
-        target_update_tau=target_update_tau,
-        target_update_period=target_update_period,
-        td_errors_loss_fn=td_errors_loss_fn,
-        gamma=gamma,
-        reward_scale_factor=reward_scale_factor,
-        gradient_clipping=gradient_clipping,
-        debug_summaries=debug_summaries,
-        summarize_grads_and_vars=summarize_grads_and_vars,
-        train_step_counter=global_step)
-    inner_agent.initialize()
+      # Get actor and critic net
+      actor_net = actor_distribution_network.ActorDistributionNetwork(
+          latent_observation_spec,
+          action_spec,
+          fc_layer_params=actor_fc_layers,
+          continuous_projection_net=normal_projection_net)
+      critic_net = critic_network.CriticNetwork(
+          (latent_observation_spec, action_spec),
+          observation_fc_layer_params=critic_obs_fc_layers,
+          action_fc_layer_params=critic_action_fc_layers,
+          joint_fc_layer_params=critic_joint_fc_layers)
 
-    # Build the latent sac agent
-    tf_agent = world_model_agent.WorldModelAgent(
-        time_step_spec,
-        action_spec,
-        inner_agent=inner_agent,
-        model_network=model_net,
-        model_optimizer=tf.compat.v1.train.AdamOptimizer(
-            learning_rate=model_learning_rate),
-        model_batch_size=model_batch_size,
-        num_images_per_summary=num_images_per_summary,
-        sequence_length=sequence_length,
-        gradient_clipping=gradient_clipping,
-        summarize_grads_and_vars=summarize_grads_and_vars,
-        train_step_counter=global_step,
-        py_env=py_env if py_env.gym.auto_exploration else None,
-        fps=fps)
+      # Build the inner SAC agent based on latent space
+      inner_agent = sac_agent.SacAgent(
+          latent_time_step_spec,
+          action_spec,
+          actor_network=actor_net,
+          critic_network=critic_net,
+          actor_optimizer=tf.compat.v1.train.AdamOptimizer(
+              learning_rate=actor_learning_rate),
+          critic_optimizer=tf.compat.v1.train.AdamOptimizer(
+              learning_rate=critic_learning_rate),
+          alpha_optimizer=tf.compat.v1.train.AdamOptimizer(
+              learning_rate=alpha_learning_rate),
+          target_update_tau=target_update_tau,
+          target_update_period=target_update_period,
+          td_errors_loss_fn=td_errors_loss_fn,
+          gamma=gamma,
+          reward_scale_factor=reward_scale_factor,
+          gradient_clipping=gradient_clipping,
+          debug_summaries=debug_summaries,
+          summarize_grads_and_vars=summarize_grads_and_vars,
+          train_step_counter=global_step)
+      inner_agent.initialize()
+
+      # Build the latent sac agent
+      tf_agent = latent_sac_agent.LatentSACAgent(
+          time_step_spec,
+          action_spec,
+          inner_agent=inner_agent,
+          model_network=model_net,
+          model_optimizer=tf.compat.v1.train.AdamOptimizer(
+              learning_rate=model_learning_rate),
+          model_batch_size=model_batch_size,
+          num_images_per_summary=num_images_per_summary,
+          sequence_length=sequence_length,
+          gradient_clipping=gradient_clipping,
+          summarize_grads_and_vars=summarize_grads_and_vars,
+          train_step_counter=global_step,
+          fps=fps)
+
+    else:
+      # Set up preprosessing layers for dictionary observation inputs
+      preprocessing_layers = collections.OrderedDict()
+      for name in input_names:
+        preprocessing_layers[name] = Preprocessing_Layer(32,256)
+      if len(input_names) < 2:
+        preprocessing_combiner = None
+
+      if agent_name == 'dqn':
+        q_rnn_net = q_rnn_network.QRnnNetwork(
+            observation_spec,
+            action_spec,
+            preprocessing_layers=preprocessing_layers,
+            preprocessing_combiner=preprocessing_combiner,
+            input_fc_layer_params=critic_joint_fc_layers,
+            lstm_size=critic_lstm_size,
+            output_fc_layer_params=critic_output_fc_layers)
+
+        tf_agent = dqn_agent.DqnAgent(
+            time_step_spec,
+            action_spec,
+            q_network=q_rnn_net,
+            epsilon_greedy=epsilon_greedy,
+            n_step_update=1,
+            target_update_tau=target_update_tau,
+            target_update_period=target_update_period,
+            optimizer=tf.compat.v1.train.AdamOptimizer(learning_rate=q_learning_rate),
+            td_errors_loss_fn=common.element_wise_squared_loss,
+            gamma=gamma,
+            reward_scale_factor=reward_scale_factor,
+            gradient_clipping=gradient_clipping,
+            debug_summaries=debug_summaries,
+            summarize_grads_and_vars=summarize_grads_and_vars,
+            train_step_counter=global_step)
+
+      elif agent_name == 'ddpg' or agent_name == 'td3':
+        actor_rnn_net = multi_inputs_actor_rnn_network.MultiInputsActorRnnNetwork(
+          observation_spec,
+          action_spec,
+          preprocessing_layers=preprocessing_layers,
+          preprocessing_combiner=preprocessing_combiner,
+          input_fc_layer_params=actor_fc_layers,
+          lstm_size=actor_lstm_size,
+          output_fc_layer_params=actor_output_fc_layers)
+
+        critic_rnn_net = multi_inputs_critic_rnn_network.MultiInputsCriticRnnNetwork(
+          (observation_spec, action_spec),
+          preprocessing_layers=preprocessing_layers,
+          preprocessing_combiner=preprocessing_combiner,
+          action_fc_layer_params=critic_action_fc_layers,
+          joint_fc_layer_params=critic_joint_fc_layers,
+          lstm_size=critic_lstm_size,
+          output_fc_layer_params=critic_output_fc_layers)
+
+        if agent_name == 'ddpg':
+          tf_agent = ddpg_agent.DdpgAgent(
+              time_step_spec,
+              action_spec,
+              actor_network=actor_rnn_net,
+              critic_network=critic_rnn_net,
+              actor_optimizer=tf.compat.v1.train.AdamOptimizer(
+                  learning_rate=actor_learning_rate),
+              critic_optimizer=tf.compat.v1.train.AdamOptimizer(
+                  learning_rate=critic_learning_rate),
+              ou_stddev=ou_stddev,
+              ou_damping=ou_damping,
+              target_update_tau=target_update_tau,
+              target_update_period=target_update_period,
+              dqda_clipping=dqda_clipping,
+              td_errors_loss_fn=None,
+              gamma=gamma,
+              reward_scale_factor=reward_scale_factor,
+              gradient_clipping=gradient_clipping,
+              debug_summaries=debug_summaries,
+              summarize_grads_and_vars=summarize_grads_and_vars)
+        elif agent_name == 'td3':
+          tf_agent = td3_agent.Td3Agent(
+              time_step_spec,
+              action_spec,
+              actor_network=actor_rnn_net,
+              critic_network=critic_rnn_net,
+              actor_optimizer=tf.compat.v1.train.AdamOptimizer(
+                  learning_rate=actor_learning_rate),
+              critic_optimizer=tf.compat.v1.train.AdamOptimizer(
+                  learning_rate=critic_learning_rate),
+              exploration_noise_std=exploration_noise_std,
+              target_update_tau=target_update_tau,
+              target_update_period=target_update_period,
+              actor_update_period=actor_update_period,
+              dqda_clipping=dqda_clipping,
+              td_errors_loss_fn=None,
+              gamma=gamma,
+              reward_scale_factor=reward_scale_factor,
+              gradient_clipping=gradient_clipping,
+              debug_summaries=debug_summaries,
+              summarize_grads_and_vars=summarize_grads_and_vars,
+              train_step_counter=global_step)
+
+      elif agent_name == 'sac':
+        actor_distribution_rnn_net = actor_distribution_rnn_network.ActorDistributionRnnNetwork(
+            observation_spec,
+            action_spec,
+            preprocessing_layers=preprocessing_layers,
+            preprocessing_combiner=preprocessing_combiner,
+            input_fc_layer_params=actor_fc_layers,
+            lstm_size=actor_lstm_size,
+            output_fc_layer_params=actor_output_fc_layers,
+            continuous_projection_net=normal_projection_net)
+
+        critic_rnn_net = multi_inputs_critic_rnn_network.MultiInputsCriticRnnNetwork(
+          (observation_spec, action_spec),
+          preprocessing_layers=preprocessing_layers,
+          preprocessing_combiner=preprocessing_combiner,
+          action_fc_layer_params=critic_action_fc_layers,
+          joint_fc_layer_params=critic_joint_fc_layers,
+          lstm_size=critic_lstm_size,
+          output_fc_layer_params=critic_output_fc_layers)
+
+        tf_agent = sac_agent.SacAgent(
+            time_step_spec,
+            action_spec,
+            actor_network=actor_distribution_rnn_net,
+            critic_network=critic_rnn_net,
+            actor_optimizer=tf.compat.v1.train.AdamOptimizer(
+                learning_rate=actor_learning_rate),
+            critic_optimizer=tf.compat.v1.train.AdamOptimizer(
+                learning_rate=critic_learning_rate),
+            alpha_optimizer=tf.compat.v1.train.AdamOptimizer(
+                learning_rate=alpha_learning_rate),
+            target_update_tau=target_update_tau,
+            target_update_period=target_update_period,
+            td_errors_loss_fn=tf.math.squared_difference,  # make critic loss dimension compatible
+            gamma=gamma,
+            reward_scale_factor=reward_scale_factor,
+            gradient_clipping=gradient_clipping,
+            debug_summaries=debug_summaries,
+            summarize_grads_and_vars=summarize_grads_and_vars,
+            train_step_counter=global_step)
+
+      else:
+        raise NotImplementedError
 
     tf_agent.initialize()
 
-    # Get replay buffer
-    replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
-        data_spec=tf_agent.collect_data_spec,
-        batch_size=1,  # No parallel environments
-        max_length=replay_buffer_capacity)
-    replay_observer = [replay_buffer.add_batch]
-
     # Train metrics
     env_steps = tf_metrics.EnvironmentSteps()
-    average_return = tf_metrics.AverageReturnMetric(
-        buffer_size=num_eval_episodes,
-        batch_size=tf_env.batch_size)
-    train_metrics = [
-        tf_metrics.NumberOfEpisodes(),
-        env_steps,
-        average_return,
-        tf_metrics.AverageEpisodeLengthMetric(
-            buffer_size=num_eval_episodes,
-            batch_size=tf_env.batch_size),
-    ]
 
     # Get policies
     # eval_policy = greedy_policy.GreedyPolicy(tf_agent.policy)
     eval_policy = tf_agent.policy
-    initial_collect_policy = random_tf_policy.RandomTFPolicy(
-        time_step_spec, action_spec)
-    collect_policy = tf_agent.collect_policy
 
     # Checkpointers
-    train_checkpointer = common.Checkpointer(
-        ckpt_dir=os.path.join(root_dir, 'train'),
-        agent=tf_agent,
-        global_step=global_step,
-        metrics=metric_utils.MetricsGroup(train_metrics, 'train_metrics'),
-        max_to_keep=2)
     policy_checkpointer = common.Checkpointer(
         ckpt_dir=os.path.join(root_dir, 'policy'),
         policy=eval_policy,
         global_step=global_step,
         max_to_keep=2)
-    rb_checkpointer = common.Checkpointer(
-        ckpt_dir=os.path.join(root_dir, 'replay_buffer'),
-        max_to_keep=1,
-        replay_buffer=replay_buffer)
-    train_checkpointer.initialize_or_restore()
-    rb_checkpointer.initialize_or_restore()
+    policy_checkpointer.initialize_or_restore()
 
-    # Collect driver
-    initial_collect_driver = dynamic_step_driver.DynamicStepDriver(
-        tf_env,
-        initial_collect_policy,
-        observers=replay_observer + train_metrics,
-        num_steps=initial_collect_steps)
 
-    collect_driver = dynamic_step_driver.DynamicStepDriver(
-        tf_env,
-        collect_policy,
-        observers=replay_observer + train_metrics,
-        num_steps=collect_steps_per_iteration)
-    
 
-    # Optimize the performance by using tf functions
-    initial_collect_driver.run = common.function(initial_collect_driver.run)
-    collect_driver.run = common.function(collect_driver.run)
-    tf_agent.train = common.function(tf_agent.train)
-
-    # Collect initial replay data.
-    if (env_steps.result() == 0 or replay_buffer.num_frames() == 0):
-      logging.info(
-          'Initializing replay buffer by collecting experience for %d steps'
-          'with a random policy.', initial_collect_steps)
-      initial_collect_driver.run()
-
-    compute_summaries(
-      eval_metrics,
-      eval_tf_env,
-      eval_policy,
-      train_step=global_step,
-      summary_writer=summary_writer,
-      num_episodes=1,
-      num_episodes_to_render=1,
-      model_net=model_net,
-      fps=10,
-      image_keys=input_names+mask_names)
-
-    # Dataset generates trajectories with shape [Bxslx...]
-    dataset = replay_buffer.as_dataset(
-        num_parallel_calls=3,
-        sample_batch_size=batch_size,
-        num_steps=sequence_length + 1).prefetch(3)
-    iterator = iter(dataset)
-
-    # Get train step
-    def train_step():
-      experience, _ = next(iterator)
-      return tf_agent.train(experience)
-    train_step = common.function(train_step)
-
-    def train_model_step():
-      experience, _ = next(iterator)
-      return tf_agent.train_model(experience)
-    train_model_step = common.function(train_model_step)
-
-    # Training initializations
-    time_step = None
-    time_acc = 0
-    env_steps_before = env_steps.result().numpy()
-
-    # Start training
-    for iteration in range(num_iterations):
-      start_time = time.time()
-
-      if iteration < initial_model_train_steps:
-        train_model_step()
-      else:
-        # Run collect
-        time_step, _ = collect_driver.run(time_step=time_step)
-
-        # Train an iteration
-        for _ in range(train_steps_per_iteration):
-          train_step()
-
-      time_acc += time.time() - start_time
-
-      # Log training information
-      if global_step.numpy() % log_interval == 0:
-        logging.info('env steps = %d, average return = %f', env_steps.result(),
-                     average_return.result())
-        env_steps_per_sec = (env_steps.result().numpy() -
-                             env_steps_before) / time_acc
-        logging.info('%.3f env steps/sec', env_steps_per_sec)
-        tf.summary.scalar(
-            name='env_steps_per_sec',
-            data=env_steps_per_sec,
-            step=env_steps.result())
-        time_acc = 0
-        env_steps_before = env_steps.result().numpy()
-
-      # Get training metrics
-      for train_metric in train_metrics:
-        train_metric.tf_summaries(train_step=env_steps.result())
-
-      # Evaluation
-      if global_step.numpy() % eval_interval == 0:
-        # Log evaluation metrics
-        compute_summaries(
+    # Evaluation
+    # Log evaluation metrics
+    if agent_name == 'latent_sac':
+      compute_summaries(
+        eval_metrics,
+        eval_tf_env,
+        eval_policy,
+        train_step=global_step,
+        # summary_writer=summary_writer,
+        num_episodes=num_eval_episodes,
+        num_episodes_to_render=num_images_per_summary,
+        model_net=model_net,
+        fps=10,
+        image_keys=input_names+mask_names,
+        root_dir=root_dir)
+    else:
+      results = metric_utils.eager_compute(
           eval_metrics,
           eval_tf_env,
           eval_policy,
-          train_step=global_step,
-          summary_writer=summary_writer,
           num_episodes=num_eval_episodes,
-          num_episodes_to_render=num_images_per_summary,
-          model_net=model_net,
-          fps=10,
-          image_keys=input_names+mask_names)
-
-      # Save checkpoints
-      global_step_val = global_step.numpy()
-      if global_step_val % train_checkpoint_interval == 0:
-        train_checkpointer.save(global_step=global_step_val)
-
-      if global_step_val % policy_checkpoint_interval == 0:
-        policy_checkpointer.save(global_step=global_step_val)
-
-      if global_step_val % rb_checkpoint_interval == 0:
-        rb_checkpointer.save(global_step=global_step_val)
-
-      # print(global_step_val)
+          train_step=env_steps.result(),
+          # summary_writer=summary_writer,
+          summary_prefix='Eval',
+      )
+      metric_utils.log_metrics(eval_metrics)
 
 
 def main(_):
   tf.compat.v1.enable_v2_behavior()
   logging.set_verbosity(logging.INFO)
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
-  train_controller(FLAGS.root_dir, FLAGS.experiment_name)
+  eval(FLAGS.root_dir, FLAGS.experiment_name)
 
 
 if __name__ == '__main__':

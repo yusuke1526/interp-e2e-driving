@@ -70,6 +70,9 @@ class VisionModel(tf.Module):
         features[name] = encoder(images_tmp)
     # feature = tf.concat(list(features.values()), axis=-1)
     feature = sum(features.values())
+    return self.get_z_dist_from_feature(feature)
+  
+  def get_z_dist_from_feature(self, feature):
     z_mean = self.vae_z_mean(feature)
     z_log_var = self.vae_z_log_var(feature)
     return z_mean, z_log_var

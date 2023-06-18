@@ -81,20 +81,6 @@ class WorldModel(tf.Module):
     latent = self.latent_first_prior(tf.zeros(batch_size)).sample()
     return latent
 
-  def filter(self, image, last_latent, last_action):
-    """Apply recursive filter to obtain posterior estimation of latent 
-      q(z_{t+1}|z_t,a_t,x_{t+1}).
-    """
-    feature = self.get_features(image)
-    latent = self.latent_posterior(feature, last_latent, last_action).sample()
-    return latent
-
-  def first_filter(self, image):
-    """Obtain the posterior of the latent at the first timestep q(z_1|x_1)."""
-    feature = self.get_features(image)
-    latent = self.latent_first_posterior(feature).sample()
-    return latent
-
   def get_features(self, images):
     """Get low dimensional features from images q(f_t|x_t)"""
     features = {}
