@@ -15,7 +15,7 @@ from tf_agents.policies import greedy_policy, random_tf_policy
 from tf_agents.trajectories import trajectory
 from tf_agents.utils import eager_utils
 
-from interp_e2e_driving.policies import latent_actor_policy
+from interp_e2e_driving.policies import latent_actor_policy, world_model_actor_policy
 from interp_e2e_driving.policies import autopilot_policy
 from interp_e2e_driving.utils import gif_utils
 from interp_e2e_driving.utils import nest_utils
@@ -54,20 +54,13 @@ class WorldModelAgent(tf_agent.TFAgent):
     self._summarize_grads_and_vars = summarize_grads_and_vars
     self._train_step_counter = train_step_counter
     self._fps = fps
-
-    if py_env:
-      policy = autopilot_policy.AutopilotPolicy(
-        time_step_spec=time_step_spec,
-        action_spec=action_spec,
-        py_env=py_env
-      )
-    else:
-      policy = random_tf_policy.RandomTFPolicy(
-        time_step_spec=time_step_spec,
-        action_spec=action_spec,
-        )
-
-
+    
+    policy = world_model_actor_policy.WorldModelActorPolicy(
+      time_step_spec=time_step_spec,
+      action_spec=action_spec,
+      inner_policy=inner_agent.collect_policy,
+      model_network=model_network,
+      collect=False)
 
     super(WorldModelAgent, self).__init__(
         time_step_spec,
@@ -110,17 +103,17 @@ class WorldModelAgent(tf_agent.TFAgent):
     step_types = step_types[:, :sequence_length]
 
     # Compuate the latents
-    # _, _, zs = self._model_network.vision.encode_sequence(images)
-    # prev_zs = zs[:, :-1]
-    # rnn_output, _, _ = self._model_network.memory.get_rnn_output(
-    #   input_z=prev_zs,
-    #   input_action=prev_actions,
-    #   prev_rew=prev_rewards,
-    # )
-    # rnn_output = tf.concat([tf.zeros((rnn_output.shape[0], 1, rnn_output.shape[2])), rnn_output], axis=1)
+    _, _, zs = self._model_network.vision.encode_sequence(images)
+    prev_zs = zs[:, :-1]
+    rnn_output, _, _ = self._model_network.memory.get_rnn_output(
+      input_z=prev_zs,
+      input_action=prev_actions,
+      prev_rew=prev_rewards,
+    )
+    rnn_output = tf.concat([tf.zeros((rnn_output.shape[0], 1, rnn_output.shape[2])), rnn_output], axis=1)
 
-    # latents = tf.concat([zs, rnn_output], axis=-1)
-    _, _, latents = self._model_network.vision.encode_sequence(images)
+    latents = tf.concat([zs, rnn_output], axis=-1)
+    # _, _, latents = self._model_network.vision.encode_sequence(images)
 
     if isinstance(latents, (tuple, list)):
       latents = tf.concat(latents, axis=-1)
