@@ -34,18 +34,16 @@ class AutopilotPolicy(tf_policy.TFPolicy):
 
   def _action(self, time_step, policy_state, seed, *args, **kwargs):
       # Autopilotから制御信号を取得
-      # if self.py_env.gym.ego:
-      #   control = self.py_env.gym.ego.get_control()
-      #   throttle = control.throttle
-      #   steer = control.steer
-      #   brake = control.brake
-      # else:
-      #   throttle = 0.0
-      #   steer = 0.0
-      #   brake = 0.0
-      throttle = 0.0
-      steer = 0.0
-      brake = 0.0
+      if self.py_env.gym.ego:
+        control = self.py_env.gym.ego.get_control()
+        throttle = control.throttle
+        steer = control.steer
+        brake = control.brake
+      else:
+        throttle = 0.0
+        steer = 0.0
+        brake = 0.0
+
 
         
       # Convert throttle and brake to acceleration
