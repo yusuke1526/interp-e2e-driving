@@ -1,16 +1,9 @@
-import sys
-import copy
 import numpy as np
-import pygame
-import random
-import time
-from skimage.transform import resize
 
 import gym
+import pygame
 from gym import spaces
-from gym.utils import seeding
-
-import cv2
+from skimage.transform import resize
 
 import tensorflow as tf
 from tf_agents.utils import common
@@ -163,18 +156,7 @@ class WorldModelEnv(gym.Env):
 
         return obs, reward, done, info
 
-    def render(self, mode="human"):
-        # modeとしてhuman, rgb_array, ansiが選択可能
-        # humanなら描画し, rgb_arrayならそれをreturnし, ansiなら文字列をreturnする
-        def float_to_uint8(image):
-            # [0, 1]の範囲を[0, 255]の範囲にスケーリングする
-            scaled_image = image * 255.0
-
-            # 整数に変換し、範囲を[0, 255]にクリッピングする
-            uint8_image = np.clip(scaled_image, 0, 255).astype(np.uint8)
-
-            return uint8_image
-
+    def render(self):
         images = self.world_model.reconstruct(self.latent).numpy()
         images = np.hsplit(images, 3)
         for i, image in enumerate(images):
