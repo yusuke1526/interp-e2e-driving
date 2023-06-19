@@ -302,10 +302,12 @@ def collect_dataset(
             action_spec=action_spec,
         )
 
-    tfrecords = [p for p in sorted(list(glob.glob(os.path.join(root_dir, 'dataset.tfrecord.*')))) if 'spec' not in p]
+
+    tfrecords = [p for p in list(glob.glob(os.path.join(root_dir, 'dataset.tfrecord.*'))) if 'spec' not in p]
+    tfrecords = sorted(tfrecords, key=lambda x: int(x.split('.')[-1]))
     latest_num = int(tfrecords[-1].split('.')[-1]) if len(tfrecords) > 0 else 0
 
-    for i in range(latest_num, latest_num+num_iteration):
+    for i in range(latest_num+1, latest_num+1+num_iteration):
         # Get tfrecord observer
         trajectory_spec = tf_agent.collect_data_spec
         dataset_path = os.path.join(root_dir, f'dataset.tfrecord.{i}')

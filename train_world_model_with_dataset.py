@@ -238,9 +238,9 @@ def compute_summaries(valid_dataset,
   gif_summary = common.function(gif_utils.gif_summary_v2)
 
   # Summarize to tensorboard
-  gif_summary('ObservationVideoEvalPolicy', images, 1, fps)
-  gif_summary('ReconstructedVideoEvalPolicy', reconstruct_images, 1, fps)
-  gif_summary('ReconstructedVideoFromLatentsEvalPolicy', reconstruct_images_from_latents, 1, fps)
+#   gif_summary('ObservationVideoEvalPolicy', images, 1, fps)
+#   gif_summary('ReconstructedVideoEvalPolicy', reconstruct_images, 1, fps)
+#   gif_summary('ReconstructedVideoFromLatentsEvalPolicy', reconstruct_images_from_latents, 1, fps)
   gif_summary('ObservationReconstructedVideoEval', all_images, 1, fps)
 
   return total_loss
@@ -269,7 +269,7 @@ def pad_and_concatenate_videos(videos, image_keys, is_dict=False):
       video.extend(
           [np.zeros_like(video[-1])] * (max_episode_length - len(video)))
   #　frames is [(each episodes obs at timestep t)]
-  videos = [tf.concat(frames, axis=1) for frames in zip(*videos)]
+  videos = [tf.concat(frames, axis=2) for frames in zip(*videos)]
   return videos
 
 
@@ -371,7 +371,8 @@ def train_world_model(
       )
 
     # Load dataset from dumped tfrecords with shape [Bxslx...]
-    tfrecords = [p for p in sorted(list(glob.glob(os.path.join(dataset_dir, 'dataset.tfrecord.*')))) if 'spec' not in p]
+    tfrecords = [p for p in list(glob.glob(os.path.join(dataset_dir, 'dataset.tfrecord.*'))) if 'spec' not in p]
+    tfrecords = sorted(tfrecords, key=lambda x: int(x.split('.')[-1]))
     dataset = example_encoding_dataset.load_tfrecord_dataset(tfrecords[:int(len(tfrecords)*0.8)], num_parallel_reads=1, add_batch_dim=False, as_trajectories=True) \
         .batch(sequence_length+1, drop_remainder=True).batch(batch_size, drop_remainder=True).repeat(-1).prefetch(3)
     valid_dataset = example_encoding_dataset.load_tfrecord_dataset(tfrecords[int(len(tfrecords)*0.8):], num_parallel_reads=1, add_batch_dim=False, as_trajectories=True) \
