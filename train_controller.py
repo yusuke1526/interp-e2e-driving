@@ -231,7 +231,7 @@ def pad_and_concatenate_videos(videos, image_keys, is_dict=False):
       video.extend(
           [np.zeros_like(video[-1])] * (max_episode_length - len(video)))
   #　frames is [(each episodes obs at timestep t)]
-  videos = [tf.concat(frames, axis=1) for frames in zip(*videos)]
+  videos = [tf.concat(frames, axis=2) for frames in zip(*videos)]
   return videos
 
 
