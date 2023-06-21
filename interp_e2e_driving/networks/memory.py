@@ -45,7 +45,12 @@ class MemoryModel(tf.Module):
         self.prior = tfd.MultivariateNormalDiag
 
     def get_rnn_output(
-        self, input_z, input_action, prev_rew, state_input_h=None, state_input_c=None
+        self,
+        input_z,
+        input_action,
+        prev_rew,
+        state_input_h=None,
+        state_input_c=None,
     ):
         if (input_action is None) or prev_rew is None:
             input_action = tf.zeros(
@@ -114,7 +119,11 @@ class MemoryModel(tf.Module):
         z_loss = self.z_loss(z_pred, y_true)
         rew_loss = self.rew_loss(rew_pred, y_true)
 
-        return self.z_factor * z_loss + self.rew_factor * rew_loss, z_loss, rew_loss
+        return (
+            self.z_factor * z_loss + self.rew_factor * rew_loss,
+            z_loss,
+            rew_loss,
+        )
 
     def z_loss(self, y_pred, y_true):
         log_pi, mu, log_sigma = y_pred
@@ -195,8 +204,12 @@ if __name__ == "__main__":
         action_size=action_size,
         gaussian_mixtures=gaussian_mixtures,
     )
-    z = tf.random.normal([batch_size, timesteps, latent_size], 1, 1, tf.float32)
-    a = tf.random.normal([batch_size, timesteps, action_size], 1, 1, tf.float32)
+    z = tf.random.normal(
+        [batch_size, timesteps, latent_size], 1, 1, tf.float32
+    )
+    a = tf.random.normal(
+        [batch_size, timesteps, action_size], 1, 1, tf.float32
+    )
     h = tf.zeros(
         [batch_size, latent_size + action_size + 1], tf.float32
     )  # 1 is for reward

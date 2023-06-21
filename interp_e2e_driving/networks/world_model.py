@@ -19,7 +19,9 @@ from interp_e2e_driving.networks.memory import MemoryModel
 
 tfd = tfp.distributions
 
-WorldModelLossInfo = collections.namedtuple("WorldModelLossInfo", ("model_loss"))
+WorldModelLossInfo = collections.namedtuple(
+    "WorldModelLossInfo", ("model_loss")
+)
 
 
 @gin.configurable
@@ -70,11 +72,15 @@ class WorldModel(tf.Module):
         latent_distribution_ctor = MultivariateNormalDiag
 
         # p(z_1)
-        self.latent_first_prior = latent_first_prior_distribution_ctor(latent_size)
+        self.latent_first_prior = latent_first_prior_distribution_ctor(
+            latent_size
+        )
         # p(z_{t+1} | z_t, a_t)
         self.memory = MemoryModel(latent_size, action_size, gaussian_mixtures)
 
-        self.vision = VisionModel(input_names, reconstruct_names, obs_size, latent_size)
+        self.vision = VisionModel(
+            input_names, reconstruct_names, obs_size, latent_size
+        )
 
     def sample_prior(self, batch_size):
         """Sample the prior latent state."""
@@ -114,10 +120,12 @@ class WorldModel(tf.Module):
         """
 
         next_images = {
-            name: image_sequence[:, 1:] for name, image_sequence in images.items()
+            name: image_sequence[:, 1:]
+            for name, image_sequence in images.items()
         }
         images = {
-            name: image_sequence[:, :-1] for name, image_sequence in images.items()
+            name: image_sequence[:, :-1]
+            for name, image_sequence in images.items()
         }
 
         next_actions = actions[:, 1:]
@@ -163,9 +171,15 @@ class WorldModel(tf.Module):
             step_types=step_types,
         )
         z_true = tf.concat([next_zs, next_rewards], axis=-1)
-        memory_loss, z_loss, rew_loss = self.memory.compute_loss(z_preds, z_true)
+        memory_loss, z_loss, rew_loss = self.memory.compute_loss(
+            z_preds, z_true
+        )
         outputs.update(
-            {"memory_loss": memory_loss, "z_loss": z_loss, "rew_loss": rew_loss}
+            {
+                "memory_loss": memory_loss,
+                "z_loss": z_loss,
+                "rew_loss": rew_loss,
+            }
         )
         loss += memory_loss
 
@@ -204,7 +218,11 @@ class WorldModel(tf.Module):
         state_input_h=None,
         state_input_c=None,
     ):
-        (log_pi, mu, log_sigma), rew_pred, (state_h, state_c) = self.memory.pred(
+        (
+            (log_pi, mu, log_sigma),
+            rew_pred,
+            (state_h, state_c),
+        ) = self.memory.pred(
             input_z=input_z,
             input_action=input_action,
             prev_rew=prev_rew,
@@ -213,6 +231,10 @@ class WorldModel(tf.Module):
             state_input_c=state_input_c,
             return_state=True,
         )
+
+        # monitor sigma
+        sigma = tf.exp(log_sigma).numpy()
+        print(int(sigma.max() * 10000))
         z = self.memory.sample_z(log_pi, mu, log_sigma)
         return z, rew_pred, (state_h, state_c)
 
@@ -248,9 +270,13 @@ class WorldModel(tf.Module):
             trainable_model_variables += self.vision.trainable_variables
         if train_flag["memory"]:
             trainable_model_variables += self.memory.trainable_variables
-        assert trainable_model_variables, "No trainable model variables to " "optimize."
+        assert trainable_model_variables, (
+            "No trainable model variables to " "optimize."
+        )
         model_grads = tape.gradient(model_loss, trainable_model_variables)
-        self.optimizer.apply_gradients(zip(model_grads, trainable_model_variables))
+        self.optimizer.apply_gradients(
+            zip(model_grads, trainable_model_variables)
+        )
 
         self.train_step_counter.assign_add(1)
 
@@ -277,7 +303,9 @@ class WorldModel(tf.Module):
             )
             for name, output in outputs.items():
                 if output.shape.ndims == 0:
-                    tf.summary.scalar(name, output, step=self.train_step_counter)
+                    tf.summary.scalar(
+                        name, output, step=self.train_step_counter
+                    )
                 elif output.shape.ndims == 5:
                     output = output[: self._num_images_per_summary]
                     output = tf.transpose(output, [1, 0, 2, 3, 4])
@@ -324,10 +352,15 @@ class WorldModel(tf.Module):
 
         _, _, zs = self.vision.encode_sequence(images)
         (log_pi, mu, log_sigma), rew_pred = self.memory.pred(
-            input_z=zs, input_action=actions, prev_rew=rewards, step_types=step_types
+            input_z=zs,
+            input_action=actions,
+            prev_rew=rewards,
+            step_types=step_types,
         )
         z_preds = self.memory.sample_z(log_pi, mu, log_sigma)
-        z_preds = tf.reshape(z_preds, (batch_size, sequence_length, self.latent_size))
+        z_preds = tf.reshape(
+            z_preds, (batch_size, sequence_length, self.latent_size)
+        )
 
         return tf.concat([z_preds, rew_pred], axis=-1)
 
@@ -344,11 +377,15 @@ if __name__ == "__main__":
         "latent_size": 32,
     }
     rgb = (
-        tf.ones([batch_size, params["obs_size"], params["obs_size"], 3], tf.float32)
+        tf.ones(
+            [batch_size, params["obs_size"], params["obs_size"], 3], tf.float32
+        )
         * 10
     )
     mask = (
-        tf.ones([batch_size, params["obs_size"], params["obs_size"], 3], tf.float32)
+        tf.ones(
+            [batch_size, params["obs_size"], params["obs_size"], 3], tf.float32
+        )
         * 100
     )
     images = {"rgb": rgb, "mask": mask}
