@@ -104,7 +104,7 @@ class WorldModelEnv(gym.Env):
         optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=0.1)
         best_loss = tf.Variable(float("inf"))
         model_checkpointer = common.Checkpointer(
-            ckpt_dir="./logs/carla-v0/memory/checkpoint",
+            ckpt_dir=params["world_model_ckpt_dir"],
             model=model_net,
             optimizer=optimizer,
             global_step=global_step,
@@ -183,7 +183,7 @@ if __name__ == "__main__":
         "lidar_bin": 0.5,
         "continuous_accel_range": [-3.0, 3.0],
         "continuous_steer_range": [-0.3, 0.3],
-        "world_model_ckpt_dir": "./logs/carla-v0/memory/checkpoint",
+        "world_model_ckpt_dir": "./logs/carla-v0/auto_memory/checkpoint",
         "display_size": 256,
     }
 
