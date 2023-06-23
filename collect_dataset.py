@@ -50,83 +50,94 @@ from interp_e2e_driving.networks import world_model
 from interp_e2e_driving.policies import autopilot_policy
 
 
-flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
-                    'Root directory for writing logs/summaries/checkpoints.')
-flags.DEFINE_string('experiment_name', None,
-                    'Experiment name used for naming the output directory.')
-flags.DEFINE_multi_string('gin_file', None, 'Path to the trainer config files.')
-flags.DEFINE_multi_string('gin_param', None, 'Gin binding to pass through.')
+flags.DEFINE_string(
+    "root_dir",
+    os.getenv("TEST_UNDECLARED_OUTPUTS_DIR"),
+    "Root directory for writing logs/summaries/checkpoints.",
+)
+flags.DEFINE_string(
+    "experiment_name",
+    None,
+    "Experiment name used for naming the output directory.",
+)
+flags.DEFINE_multi_string(
+    "gin_file", None, "Path to the trainer config files."
+)
+flags.DEFINE_multi_string("gin_param", None, "Gin binding to pass through.")
 
 FLAGS = flags.FLAGS
 
 
 @gin.configurable
 def load_carla_env(
-        env_name='carla-v0',
-        discount=1.0,
-        number_of_vehicles=100,
-        number_of_walkers=0,
-        display_size=256,
-        max_past_step=1,
-        dt=0.1,
-        discrete=False,
-        discrete_acc=[-3.0, 0.0, 3.0],
-        discrete_steer=[-0.2, 0.0, 0.2],
-        continuous_accel_range=[-3.0, 3.0],
-        continuous_steer_range=[-0.3, 0.3],
-        ego_vehicle_filter='vehicle.lincoln*',
-        port=2000,
-        town='Town03',
-        task_mode='random',
-        max_time_episode=500,
-        max_waypt=12,
-        obs_range=32,
-        lidar_bin=0.5,
-        d_behind=12,
-        out_lane_thres=2.0,
-        desired_speed=8,
-        max_ego_spawn_times=200,
-        display_route=True,
-        pixor_size=64,
-        pixor=False,
-        obs_channels=None,
-        auto_exploration=False,
-        action_repeat=1):
+    env_name="carla-v0",
+    discount=1.0,
+    number_of_vehicles=100,
+    number_of_walkers=0,
+    display_size=256,
+    max_past_step=1,
+    dt=0.1,
+    discrete=False,
+    discrete_acc=[-3.0, 0.0, 3.0],
+    discrete_steer=[-0.2, 0.0, 0.2],
+    continuous_accel_range=[-3.0, 3.0],
+    continuous_steer_range=[-0.3, 0.3],
+    ego_vehicle_filter="vehicle.lincoln*",
+    port=2000,
+    town="Town03",
+    task_mode="random",
+    max_time_episode=500,
+    max_waypt=12,
+    obs_range=32,
+    lidar_bin=0.5,
+    d_behind=12,
+    out_lane_thres=2.0,
+    desired_speed=8,
+    max_ego_spawn_times=200,
+    display_route=True,
+    pixor_size=64,
+    pixor=False,
+    obs_channels=None,
+    auto_exploration=False,
+    action_repeat=1,
+):
     """Loads train and eval environments."""
     env_params = {
-        'number_of_vehicles': number_of_vehicles,
-        'number_of_walkers': number_of_walkers,
-        'display_size': display_size,  # screen size of bird-eye render
-        'max_past_step': max_past_step,  # the number of past steps to draw
-        'dt': dt,  # time interval between two frames
-        'discrete': discrete,  # whether to use discrete control space
-        'discrete_acc': discrete_acc,  # discrete value of accelerations
-        'discrete_steer': discrete_steer,  # discrete value of steering angles
-        'continuous_accel_range': continuous_accel_range,  # continuous acceleration range
-        'continuous_steer_range': continuous_steer_range,  # continuous steering angle range
-        'ego_vehicle_filter': ego_vehicle_filter,  # filter for defining ego vehicle
-        'port': port,  # connection port
-        'town': town,  # which town to simulate
-        'task_mode': task_mode,  # mode of the task, [random, roundabout (only for Town03)]
-        'max_time_episode': max_time_episode,  # maximum timesteps per episode
-        'max_waypt': max_waypt,  # maximum number of waypoints
-        'obs_range': obs_range,  # observation range (meter)
-        'lidar_bin': lidar_bin,  # bin size of lidar sensor (meter)
-        'd_behind': d_behind,  # distance behind the ego vehicle (meter)
-        'out_lane_thres': out_lane_thres,  # threshold for out of lane
-        'desired_speed': desired_speed,  # desired speed (m/s)
-        'max_ego_spawn_times': max_ego_spawn_times,  # maximum times to spawn ego vehicle
-        'display_route': display_route,  # whether to render the desired route
-        'pixor_size': pixor_size,  # size of the pixor labels
-        'pixor': pixor,  # whether to output PIXOR observation
-        'auto_exploration': auto_exploration,
+        "number_of_vehicles": number_of_vehicles,
+        "number_of_walkers": number_of_walkers,
+        "display_size": display_size,  # screen size of bird-eye render
+        "max_past_step": max_past_step,  # the number of past steps to draw
+        "dt": dt,  # time interval between two frames
+        "discrete": discrete,  # whether to use discrete control space
+        "discrete_acc": discrete_acc,  # discrete value of accelerations
+        "discrete_steer": discrete_steer,  # discrete value of steering angles
+        "continuous_accel_range": continuous_accel_range,  # continuous acceleration range
+        "continuous_steer_range": continuous_steer_range,  # continuous steering angle range
+        "ego_vehicle_filter": ego_vehicle_filter,  # filter for defining ego vehicle
+        "port": port,  # connection port
+        "town": town,  # which town to simulate
+        "task_mode": task_mode,  # mode of the task, [random, roundabout (only for Town03)]
+        "max_time_episode": max_time_episode,  # maximum timesteps per episode
+        "max_waypt": max_waypt,  # maximum number of waypoints
+        "obs_range": obs_range,  # observation range (meter)
+        "lidar_bin": lidar_bin,  # bin size of lidar sensor (meter)
+        "d_behind": d_behind,  # distance behind the ego vehicle (meter)
+        "out_lane_thres": out_lane_thres,  # threshold for out of lane
+        "desired_speed": desired_speed,  # desired speed (m/s)
+        "max_ego_spawn_times": max_ego_spawn_times,  # maximum times to spawn ego vehicle
+        "display_route": display_route,  # whether to render the desired route
+        "pixor_size": pixor_size,  # size of the pixor labels
+        "pixor": pixor,  # whether to output PIXOR observation
+        "auto_exploration": auto_exploration,
     }
 
     gym_spec = gym.spec(env_name)
     gym_env = gym_spec.make(params=env_params)
 
     if obs_channels:
-        gym_env = filter_observation_wrapper.FilterObservationWrapper(gym_env, obs_channels)
+        gym_env = filter_observation_wrapper.FilterObservationWrapper(
+            gym_env, obs_channels
+        )
 
     py_env = gym_wrapper.GymWrapper(
         gym_env,
@@ -142,26 +153,27 @@ def load_carla_env(
     return py_env, eval_py_env
 
 
-def normal_projection_net(action_spec,
-                          init_action_stddev=0.35,
-                          init_means_output_factor=0.1):
-  del init_action_stddev
-  return normal_projection_network.NormalProjectionNetwork(
-      action_spec,
-      mean_transform=None,
-      state_dependent_std=True,
-      init_means_output_factor=init_means_output_factor,
-      std_transform=sac_agent.std_clip_transform,
-      scale_distribution=True)
+def normal_projection_net(
+    action_spec, init_action_stddev=0.35, init_means_output_factor=0.1
+):
+    del init_action_stddev
+    return normal_projection_network.NormalProjectionNetwork(
+        action_spec,
+        mean_transform=None,
+        state_dependent_std=True,
+        init_means_output_factor=init_means_output_factor,
+        std_transform=sac_agent.std_clip_transform,
+        scale_distribution=True,
+    )
 
 
 @gin.configurable
 def collect_dataset(
     root_dir,
     experiment_name,  # experiment name
-    env_name='carla-v0',
-    input_names=['camera', 'lidar'],  # names for inputs
-    mask_names=['birdeye'],  # names for masks
+    env_name="carla-v0",
+    input_names=["camera", "lidar"],  # names for inputs
+    mask_names=["birdeye"],  # names for masks
     latent_size=64,
     # Params for collect
     initial_collect_steps=int(1e5),
@@ -172,6 +184,7 @@ def collect_dataset(
     critic_action_fc_layers=None,
     critic_joint_fc_layers=(256, 256),
     auto_exploration=False,
+    noise_dist=None,  # param for gaussian noise added to action [mean, std]
     # Params for target update
     target_update_tau=0.005,
     target_update_period=1,
@@ -195,9 +208,10 @@ def collect_dataset(
     summarize_grads_and_vars=False,
     gpu_allow_growth=True,  # GPU memory growth
     gpu_memory_limit=None,  # GPU memory limit
-    action_repeat=1):  # Name of single observation channel, ['camera', 'lidar', 'birdeye']
+    action_repeat=1,
+):  # Name of single observation channel, ['camera', 'lidar', 'birdeye']
     # Setup GPU
-    gpus = tf.config.experimental.list_physical_devices('GPU')
+    gpus = tf.config.experimental.list_physical_devices("GPU")
     if gpu_allow_growth:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
@@ -205,8 +219,12 @@ def collect_dataset(
         for gpu in gpus:
             tf.config.experimental.set_virtual_device_configuration(
                 gpu,
-                [tf.config.experimental.VirtualDeviceConfiguration(
-                    memory_limit=gpu_memory_limit)])
+                [
+                    tf.config.experimental.VirtualDeviceConfiguration(
+                        memory_limit=gpu_memory_limit
+                    )
+                ],
+            )
 
     # Get train and eval direction
     root_dir = os.path.expanduser(root_dir)
@@ -215,7 +233,12 @@ def collect_dataset(
     global_step = tf.compat.v1.train.get_or_create_global_step()
 
     # Create Carla environment
-    py_env, eval_py_env = load_carla_env(env_name='carla-v0', obs_channels=input_names+mask_names, action_repeat=action_repeat, auto_exploration=auto_exploration)
+    py_env, eval_py_env = load_carla_env(
+        env_name="carla-v0",
+        obs_channels=input_names + mask_names,
+        action_repeat=action_repeat,
+        auto_exploration=auto_exploration,
+    )
 
     tf_env = tf_py_environment.TFPyEnvironment(py_env)
     fps = int(np.round(1.0 / (py_env.dt * action_repeat)))
@@ -228,30 +251,36 @@ def collect_dataset(
     # Get model network for latent sac
     model_net = world_model.WorldModel(
         input_names=input_names,
-        reconstruct_names=input_names+mask_names,
+        reconstruct_names=input_names + mask_names,
         action_size=action_spec.shape[0],
         gaussian_mixtures=5,  # TODO パラメタライズ
         obs_size=py_env.obs_size,
-        latent_size=latent_size
+        latent_size=latent_size,
     )
 
     # Get the latent spec
-    rnn_state_size = latent_size + action_spec.shape[0] + 1 # 1 is for reward
-    latent_observation_spec = tensor_spec.TensorSpec((latent_size+rnn_state_size,), dtype=tf.float32)
+    rnn_state_size = latent_size + action_spec.shape[0] + 1  # 1 is for reward
+    latent_observation_spec = tensor_spec.TensorSpec(
+        (latent_size + rnn_state_size,), dtype=tf.float32
+    )
     # latent_observation_spec = tensor_spec.TensorSpec((latent_size,), dtype=tf.float32)
-    latent_time_step_spec = ts.time_step_spec(observation_spec=latent_observation_spec)
+    latent_time_step_spec = ts.time_step_spec(
+        observation_spec=latent_observation_spec
+    )
 
     # Get actor and critic net
     actor_net = actor_distribution_network.ActorDistributionNetwork(
         latent_observation_spec,
         action_spec,
         fc_layer_params=actor_fc_layers,
-        continuous_projection_net=normal_projection_net)
+        continuous_projection_net=normal_projection_net,
+    )
     critic_net = critic_network.CriticNetwork(
         (latent_observation_spec, action_spec),
         observation_fc_layer_params=critic_obs_fc_layers,
         action_fc_layer_params=critic_action_fc_layers,
-        joint_fc_layer_params=critic_joint_fc_layers)
+        joint_fc_layer_params=critic_joint_fc_layers,
+    )
 
     # Build the inner SAC agent based on latent space
     inner_agent = sac_agent.SacAgent(
@@ -260,11 +289,14 @@ def collect_dataset(
         actor_network=actor_net,
         critic_network=critic_net,
         actor_optimizer=tf.compat.v1.train.AdamOptimizer(
-            learning_rate=actor_learning_rate),
+            learning_rate=actor_learning_rate
+        ),
         critic_optimizer=tf.compat.v1.train.AdamOptimizer(
-            learning_rate=critic_learning_rate),
+            learning_rate=critic_learning_rate
+        ),
         alpha_optimizer=tf.compat.v1.train.AdamOptimizer(
-            learning_rate=alpha_learning_rate),
+            learning_rate=alpha_learning_rate
+        ),
         target_update_tau=target_update_tau,
         target_update_period=target_update_period,
         td_errors_loss_fn=td_errors_loss_fn,
@@ -273,7 +305,8 @@ def collect_dataset(
         gradient_clipping=gradient_clipping,
         debug_summaries=debug_summaries,
         summarize_grads_and_vars=summarize_grads_and_vars,
-        train_step_counter=global_step)
+        train_step_counter=global_step,
+    )
 
     # Build the latent sac agent
     tf_agent = world_model_agent.WorldModelAgent(
@@ -282,51 +315,64 @@ def collect_dataset(
         inner_agent=inner_agent,
         model_network=model_net,
         model_optimizer=tf.compat.v1.train.AdamOptimizer(
-            learning_rate=model_learning_rate),
+            learning_rate=model_learning_rate
+        ),
         model_batch_size=model_batch_size,
         num_images_per_summary=num_images_per_summary,
         sequence_length=sequence_length,
         gradient_clipping=gradient_clipping,
         summarize_grads_and_vars=summarize_grads_and_vars,
         train_step_counter=global_step,
-        py_env=py_env if py_env.gym.auto_exploration else None,
-        fps=fps)
+        py_env=py_env if auto_exploration else None,
+        fps=fps,
+    )
 
     # Get policies
     if auto_exploration:
         initial_collect_policy = autopilot_policy.AutopilotPolicy(
-            time_step_spec, action_spec, py_env)
+            time_step_spec, action_spec, py_env, noise_dist
+        )
     else:
         initial_collect_policy = random_tf_policy.RandomTFPolicy(
             time_step_spec=time_step_spec,
             action_spec=action_spec,
         )
 
+    tfrecords = [
+        p
+        for p in list(glob.glob(os.path.join(root_dir, "dataset.tfrecord.*")))
+        if "spec" not in p
+    ]
+    tfrecords = sorted(tfrecords, key=lambda x: int(x.split(".")[-1]))
+    latest_num = int(tfrecords[-1].split(".")[-1]) if len(tfrecords) > 0 else -1
 
-    tfrecords = [p for p in list(glob.glob(os.path.join(root_dir, 'dataset.tfrecord.*'))) if 'spec' not in p]
-    tfrecords = sorted(tfrecords, key=lambda x: int(x.split('.')[-1]))
-    latest_num = int(tfrecords[-1].split('.')[-1]) if len(tfrecords) > 0 else 0
-
-    for i in range(latest_num+1, latest_num+1+num_iteration):
+    for i in range(latest_num + 1, latest_num + 1 + num_iteration):
         # Get tfrecord observer
         trajectory_spec = tf_agent.collect_data_spec
-        dataset_path = os.path.join(root_dir, f'dataset.tfrecord.{i}')
-        tfrecord_observer = example_encoding_dataset.TFRecordObserver(dataset_path, trajectory_spec)
+        dataset_path = os.path.join(root_dir, f"dataset.tfrecord.{i}")
+        tfrecord_observer = example_encoding_dataset.TFRecordObserver(
+            dataset_path, trajectory_spec
+        )
 
         # Collect driver
         initial_collect_driver = dynamic_step_driver.DynamicStepDriver(
             tf_env,
             initial_collect_policy,
             observers=[common.function(tfrecord_observer)],
-            num_steps=initial_collect_steps)
+            num_steps=initial_collect_steps,
+        )
 
         # Optimize the performance by using tf functions
-        initial_collect_driver.run = common.function(initial_collect_driver.run)
+        # initial_collect_driver.run = common.function(
+        #     initial_collect_driver.run
+        # )
 
         # Collect initial replay data.
         logging.info(
-            'Initializing replay buffer by collecting experience for %d steps'
-            'with a random policy.', initial_collect_steps)
+            "Initializing replay buffer by collecting experience for %d steps"
+            "with a random policy.",
+            initial_collect_steps,
+        )
         initial_collect_driver.run()
 
 
@@ -337,7 +383,7 @@ def main(_):
     collect_dataset(FLAGS.root_dir, FLAGS.experiment_name)
 
 
-if __name__ == '__main__':
-    flags.mark_flag_as_required('root_dir')
-    flags.mark_flag_as_required('experiment_name')
+if __name__ == "__main__":
+    flags.mark_flag_as_required("root_dir")
+    flags.mark_flag_as_required("experiment_name")
     app.run(main)
