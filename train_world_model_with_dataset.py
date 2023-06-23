@@ -494,7 +494,6 @@ def train_world_model(
         # Start training
         while global_step.numpy() < num_iterations:
             experience = next(iterator)
-            print(experience.action)
             model_net.train(
                 experience,
                 train_flag={
