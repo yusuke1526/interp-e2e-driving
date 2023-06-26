@@ -22,8 +22,6 @@ def rgb_to_display_surface(rgb, display_size):
     display = resize(rgb, (display_size, display_size))
     display = np.flip(display, axis=1)
     display = np.rot90(display, 1)
-    # print(surface)
-    # print(display.shape)
     pygame.surfarray.blit_array(surface, display)
     return surface
 
@@ -207,7 +205,7 @@ if __name__ == "__main__":
             env.reset()
         # acc, steer
         action, _states = tf.Variable([[[acc, steer]]]), None
-        print(action)
+
         obs, rewards, dones, info = env.step(action)
         env.render()
         # if dones:
