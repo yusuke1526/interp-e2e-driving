@@ -23,8 +23,8 @@ class MemoryModel(tf.Module):
         action_size,
         gaussian_mixtures,
         name=None,
-        z_factor=0.1,
-        rew_factor=0.1,
+        z_factor=10.0,
+        rew_factor=1.0,
     ):
         super(MemoryModel, self).__init__(name=name)
         self.latent_size = latent_size
