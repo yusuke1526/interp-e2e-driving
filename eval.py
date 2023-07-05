@@ -47,10 +47,12 @@ from tf_agents.utils import common
 
 from interp_e2e_driving.agents.ddpg import ddpg_agent
 from interp_e2e_driving.agents.latent_sac import latent_sac_agent
+from interp_e2e_driving.agents.world_model import world_model_agent
 from interp_e2e_driving.environments import filter_observation_wrapper
 from interp_e2e_driving.networks import multi_inputs_actor_rnn_network
 from interp_e2e_driving.networks import multi_inputs_critic_rnn_network
 from interp_e2e_driving.networks import sequential_latent_network
+from interp_e2e_driving.networks import world_model
 from interp_e2e_driving.utils import gif_utils
 
 
@@ -70,6 +72,63 @@ def fix_seed(seed):
     tf.random.set_seed(seed)
 
 fix_seed(0)
+
+def load_inner_agent(
+    latent_observation_spec,
+    action_spec,
+    actor_fc_layers,
+    critic_obs_fc_layers,
+    critic_action_fc_layers,
+    critic_joint_fc_layers,
+    latent_time_step_spec,
+    actor_learning_rate,
+    critic_learning_rate,
+    alpha_learning_rate,
+    target_update_tau,
+    target_update_period,
+    td_errors_loss_fn,
+    gamma,
+    reward_scale_factor,
+    gradient_clipping,
+    debug_summaries,
+    summarize_grads_and_vars,
+    global_step,
+    ):
+    # Get actor and critic net
+    actor_net = actor_distribution_network.ActorDistributionNetwork(
+        latent_observation_spec,
+        action_spec,
+        fc_layer_params=actor_fc_layers,
+        continuous_projection_net=normal_projection_net)
+    critic_net = critic_network.CriticNetwork(
+        (latent_observation_spec, action_spec),
+        observation_fc_layer_params=critic_obs_fc_layers,
+        action_fc_layer_params=critic_action_fc_layers,
+        joint_fc_layer_params=critic_joint_fc_layers)
+    
+    # Build the inner SAC agent based on latent space
+    inner_agent = sac_agent.SacAgent(
+        latent_time_step_spec,
+        action_spec,
+        actor_network=actor_net,
+        critic_network=critic_net,
+        actor_optimizer=tf.compat.v1.train.AdamOptimizer(
+            learning_rate=actor_learning_rate),
+        critic_optimizer=tf.compat.v1.train.AdamOptimizer(
+            learning_rate=critic_learning_rate),
+        alpha_optimizer=tf.compat.v1.train.AdamOptimizer(
+            learning_rate=alpha_learning_rate),
+        target_update_tau=target_update_tau,
+        target_update_period=target_update_period,
+        td_errors_loss_fn=td_errors_loss_fn,
+        gamma=gamma,
+        reward_scale_factor=reward_scale_factor,
+        gradient_clipping=gradient_clipping,
+        debug_summaries=debug_summaries,
+        summarize_grads_and_vars=summarize_grads_and_vars,
+        train_step_counter=global_step)
+    
+    return inner_agent
 
 @gin.configurable
 def load_carla_env(
@@ -133,6 +192,7 @@ def load_carla_env(
     'pixor': pixor,  # whether to output PIXOR observation
     'eval': eval,  # when eval is True, agent spawn locations are fixed
     'seed': seed,  # carla env random seed
+    'auto_exploration': False,
   }
 
   gym_spec = gym.spec(env_name)
@@ -161,7 +221,6 @@ def compute_summaries(metrics,
                       environment,
                       policy,
                       train_step=None,
-                      # summary_writer=None,
                       num_episodes=1,
                       num_episodes_to_render=1,
                       model_net=None,
@@ -206,11 +265,11 @@ def compute_summaries(metrics,
     time_step = next_time_step
 
   # Summarize scalars to tensorboard
-  if train_step:
-    with open(os.path.join(root_dir, 'result.txt'), 'w') as f:
-      for m in metrics:
-        tag = m.name
-        print(f'{tag}: {m.result()}', file=f)
+  print('save result.txt')
+  with open(os.path.join(root_dir, 'result.txt'), 'w') as f:
+    for m in metrics:
+      tag = m.name
+      print(f'{tag}: {m.result()}', file=f)
 
   # Concat input images of different episodes and generate reconstructed images.
   # Shape of images is [[images in episode as timesteps]].
@@ -230,13 +289,6 @@ def compute_summaries(metrics,
     gif = np.concatenate([images[i], reconstruct_images[i]], axis=1)
     save_gif(gif, root_dir, f'episode_{i}.gif', fps)
 
-  # Need to avoid eager here to avoid rasing error
-  gif_summary = common.function(gif_utils.gif_summary_v2)
-
-  # Summarize to tensorboard
-  # gif_summary('ObservationVideoEvalPolicy', images, 1, fps)
-  # gif_summary('ReconstructedVideoEvalPolicy', reconstruct_images, 1, fps)
-
 def save_gif(images, save_dir, file_name, fps=10):
   save_dir = os.path.join(save_dir, 'gif')
   if not os.path.exists(save_dir):
@@ -247,7 +299,7 @@ def save_gif(images, save_dir, file_name, fps=10):
   for i in range(images.shape[0]):
       # Numpy配列をImageオブジェクトに変換してリストに追加
       dicom_list.append(Image.fromarray(np.uint8(images[i])))
-  dicom_list[0].save(file_name, 
+  dicom_list[0].save(file_name,
                     save_all=True, append_images=dicom_list[1:],
                     optimize=False,
                     duration=1000//fps,
@@ -343,6 +395,7 @@ def eval(
     critic_action_fc_layers=None,
     critic_joint_fc_layers=(256, 256),
     model_network_ctor_type='non-hierarchical',  # model net
+    latent_size=64,
     input_names=['camera', 'lidar'],  # names for inputs
     mask_names=['birdeye'],  # names for masks
     preprocessing_combiner=tf.keras.layers.Add(),  # takes a flat list of tensors and combines them
@@ -430,7 +483,7 @@ def eval(
   with tf.summary.record_if(
       lambda: tf.math.equal(global_step % summary_interval, 0)):
     # Create Carla environment
-    if agent_name == 'latent_sac':
+    if agent_name in ['world_model', 'latent_sac']:
       py_env, eval_py_env = load_carla_env(env_name='carla-v0', obs_channels=input_names+mask_names, action_repeat=action_repeat)
     elif agent_name == 'dqn':
       py_env, eval_py_env = load_carla_env(env_name='carla-v0', discrete=True, obs_channels=input_names, action_repeat=action_repeat)
@@ -462,39 +515,28 @@ def eval(
       latent_observation_spec = tensor_spec.TensorSpec((latent_size,), dtype=tf.float32)
       latent_time_step_spec = ts.time_step_spec(observation_spec=latent_observation_spec)
 
-      # Get actor and critic net
-      actor_net = actor_distribution_network.ActorDistributionNetwork(
-          latent_observation_spec,
-          action_spec,
-          fc_layer_params=actor_fc_layers,
-          continuous_projection_net=normal_projection_net)
-      critic_net = critic_network.CriticNetwork(
-          (latent_observation_spec, action_spec),
-          observation_fc_layer_params=critic_obs_fc_layers,
-          action_fc_layer_params=critic_action_fc_layers,
-          joint_fc_layer_params=critic_joint_fc_layers)
-
       # Build the inner SAC agent based on latent space
-      inner_agent = sac_agent.SacAgent(
-          latent_time_step_spec,
-          action_spec,
-          actor_network=actor_net,
-          critic_network=critic_net,
-          actor_optimizer=tf.compat.v1.train.AdamOptimizer(
-              learning_rate=actor_learning_rate),
-          critic_optimizer=tf.compat.v1.train.AdamOptimizer(
-              learning_rate=critic_learning_rate),
-          alpha_optimizer=tf.compat.v1.train.AdamOptimizer(
-              learning_rate=alpha_learning_rate),
-          target_update_tau=target_update_tau,
-          target_update_period=target_update_period,
-          td_errors_loss_fn=td_errors_loss_fn,
-          gamma=gamma,
-          reward_scale_factor=reward_scale_factor,
-          gradient_clipping=gradient_clipping,
-          debug_summaries=debug_summaries,
-          summarize_grads_and_vars=summarize_grads_and_vars,
-          train_step_counter=global_step)
+      inner_agent = load_inner_agent(
+        latent_observation_spec,
+        action_spec,
+        actor_fc_layers,
+        critic_obs_fc_layers,
+        critic_action_fc_layers,
+        critic_joint_fc_layers,
+        latent_time_step_spec,
+        actor_learning_rate,
+        critic_learning_rate,
+        alpha_learning_rate,
+        target_update_tau,
+        target_update_period,
+        td_errors_loss_fn,
+        gamma,
+        reward_scale_factor,
+        gradient_clipping,
+        debug_summaries,
+        summarize_grads_and_vars,
+        global_step,
+      )
       inner_agent.initialize()
 
       # Build the latent sac agent
@@ -512,6 +554,76 @@ def eval(
           summarize_grads_and_vars=summarize_grads_and_vars,
           train_step_counter=global_step,
           fps=fps)
+      
+    elif agent_name == 'world_model':
+        best_loss = tf.Variable(float('inf'))
+        optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=model_learning_rate)
+        model_net = world_model.WorldModel(
+            input_names=input_names,
+            reconstruct_names=input_names+mask_names,
+            action_size=action_spec.shape[0],
+            gaussian_mixtures=5, # TODO パラメタライズ
+            obs_size=py_env.obs_size,
+            latent_size=latent_size,
+            optimizer=optimizer,
+            train_step_counter=global_step,
+            batch_size=model_batch_size,
+        )
+        model_checkpointer = common.Checkpointer(
+            ckpt_dir='./logs/carla-v0/memory/checkpoint',
+            model=model_net,
+            optimizer=optimizer,
+            global_step=global_step,
+            best_loss=best_loss,
+            max_to_keep=5
+        )
+        model_checkpointer.initialize_or_restore()
+
+        # Get the latent spec
+        rnn_state_size = latent_size + action_spec.shape[0] + 1 # 1 is for reward
+        latent_observation_spec = tensor_spec.TensorSpec((latent_size+rnn_state_size,), dtype=tf.float32)
+        latent_time_step_spec = ts.time_step_spec(observation_spec=latent_observation_spec)
+
+        # Build the inner SAC agent based on latent space
+        inner_agent = load_inner_agent(
+        latent_observation_spec,
+        action_spec,
+        actor_fc_layers,
+        critic_obs_fc_layers,
+        critic_action_fc_layers,
+        critic_joint_fc_layers,
+        latent_time_step_spec,
+        actor_learning_rate,
+        critic_learning_rate,
+        alpha_learning_rate,
+        target_update_tau,
+        target_update_period,
+        td_errors_loss_fn,
+        gamma,
+        reward_scale_factor,
+        gradient_clipping,
+        debug_summaries,
+        summarize_grads_and_vars,
+        global_step,
+        )
+        inner_agent.initialize()
+
+        # Build the latent sac agent
+        tf_agent = world_model_agent.WorldModelAgent(
+            time_step_spec,
+            action_spec,
+            inner_agent=inner_agent,
+            model_network=model_net,
+            model_optimizer=tf.compat.v1.train.AdamOptimizer(
+                learning_rate=model_learning_rate),
+            model_batch_size=model_batch_size,
+            num_images_per_summary=num_images_per_summary,
+            sequence_length=sequence_length,
+            gradient_clipping=gradient_clipping,
+            summarize_grads_and_vars=summarize_grads_and_vars,
+            train_step_counter=global_step,
+            py_env=py_env if py_env.gym.auto_exploration else None,
+            fps=fps)
 
     else:
       # Set up preprosessing layers for dictionary observation inputs
@@ -676,7 +788,7 @@ def eval(
 
     # Evaluation
     # Log evaluation metrics
-    if agent_name == 'latent_sac':
+    if agent_name in ['latent_sac', 'world_model']:
       compute_summaries(
         eval_metrics,
         eval_tf_env,
