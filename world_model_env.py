@@ -27,8 +27,6 @@ def rgb_to_display_surface(rgb, display_size):
 
 
 class WorldModelEnv(gym.Env):
-    metadata = {"render.modes": ["human"]}
-
     def __init__(self, params):
         # parameters
         self.input_names = params["input_names"]
@@ -180,7 +178,7 @@ if __name__ == "__main__":
         "obs_range": 32,
         "lidar_bin": 0.5,
         "continuous_accel_range": [-3.0, 3.0],
-        "continuous_steer_range": [-0.3, 0.3],
+        "continuous_steer_range": [-1.0, 1.0],
         "world_model_ckpt_dir": "./logs/carla-v0/auto_memory/checkpoint",
         "display_size": 256,
     }

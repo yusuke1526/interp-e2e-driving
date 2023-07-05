@@ -76,7 +76,7 @@ def load_carla_env(
   discrete_acc=[-3.0, 0.0, 3.0],
   discrete_steer=[-0.2, 0.0, 0.2],
   continuous_accel_range=[-3.0, 3.0],
-  continuous_steer_range=[-0.3, 0.3],
+  continuous_steer_range=[-1.0, 1.0],
   ego_vehicle_filter='vehicle.lincoln*',
   port=2000,
   town='Town03',
